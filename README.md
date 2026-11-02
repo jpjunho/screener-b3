@@ -2,7 +2,9 @@
 
 Filtra as ações da B3 por um método de qualidade e publica o resultado numa página, atualizada toda segunda-feira.
 
-**Critérios** (últimos 5 exercícios): ROE acima de 15%, margem líquida acima de 15%, dívida líquida abaixo de 3x o EBITDA, receita e lucro crescentes acima da inflação. Bancos usam métricas equivalentes (ROA, índice de Basileia, resultado da intermediação); seguradoras e holdings, só ROE e lucro. A página explica tudo em "Como funciona".
+**Critérios** (últimos 5 exercícios): ROE acima de 15%, margem líquida acima de 15%, dívida líquida abaixo de 3x o EBITDA, receita e lucro crescentes em valores corrigidos pelo IPCA. Bancos usam métricas equivalentes (ROA, índice de Basileia, resultado da intermediação); seguradoras e holdings, só ROE e lucro.
+
+**Resultado:** "Aprovado" cumpre tudo à risca; "Aprovado com Ressalvas" usa a tolerância em algum critério (alguns anos de ROE ou margem entre 10% e 15%, ou pequenas quedas de receita ou lucro). Clicando numa empresa, a página mostra a evolução de cada critério ano a ano, os alertas de qualidade do lucro e os links para a CVM.
 
 **Dados oficiais e públicos:** demonstrações financeiras da CVM, cotações da B3, IPCA e índice de Basileia do Banco Central.
 

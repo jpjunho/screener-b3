@@ -42,16 +42,16 @@ Seguradoras e holdings de participações (BB Seguridade, Itaúsa) vivem do lucr
 das investidas: só ROE e lucro crescente são comparáveis.
 
 Resultado
-- Aprovada: atende todos os critérios à risca.
-- Na margem: atende, mas usando a tolerância em algum critério: alguns anos
+- Aprovado: atende todos os critérios à risca.
+- Aprovado com Ressalvas: atende, mas usando a tolerância em algum critério: alguns anos
   de ROE ou margem entre 10% e 15%, ou quedas de até 10% na receita ou no
   lucro. Com n anos, até (n - 1) // 2 anos podem usar a tolerância: 1 com 3 ou
   4 anos, 2 com 5 anos.
 - Falta 1: reprova em exatamente um critério.
 
-"Crescente" tem duas partes: nenhuma queda de um ano para o outro (em valores
-nominais, com a tolerância acima) e crescimento médio no período acima da
-inflação (IPCA, do Banco Central). Dívida líquida / patrimônio aparece só como
+"Crescente" tem duas partes, ambas em valores corrigidos pelo IPCA (do Banco
+Central): nenhuma queda de um ano para o outro, com a tolerância acima, e
+crescimento médio no período ≥ 0. Dívida líquida / patrimônio aparece só como
 informação.
 
 Uso
@@ -972,8 +972,8 @@ def history_criterion(
 
 
 def require_real_growth(c: Criterion, real: Optional[float]) -> Criterion:
-    """Crescer também acima da inflação: além de não cair ano a ano (em
-    valores nominais), o crescimento real no período precisa ser ≥ 0."""
+    """Além de não cair ano a ano, o crescimento real no período precisa ser
+    ≥ 0 (as quedas toleradas não podem somar uma perda real)."""
     if c.passed is None or real is None:
         return c
     sign = "+" if real > 0 else ""
@@ -1235,7 +1235,7 @@ def share_prices(quotes: list[Quote], unit_sizes: dict[str, int]) -> tuple[Optio
 
 def analyze(
     company: Company, quotes: list[Quote], data: Optional[CompanyData], unit_sizes: dict[str, int], ipca: dict[str, float],
-    basel: dict[str, float], basel_date: Optional[str],
+    to_present: dict[str, float], basel: dict[str, float], basel_date: Optional[str],
 ) -> ScreenResult:
     main = max(quotes, key=lambda q: q.volume_medio)
     row = ScreenResult(
@@ -1358,16 +1358,23 @@ def analyze(
     else:
         roe_criterion = history_criterion("roe", "ROE > 15%", "ROE", window, roe,
                                           lambda y, v: evaluate_threshold(y, v, ROE_MIN, ROE_TOLERATED))
+    # Quedas ano a ano medidas em reais de hoje, os mesmos valores dos gráficos.
+    # Sem IPCA para algum ano, fica o nominal.
+    def real(series: dict[str, Optional[float]]) -> dict[str, Optional[float]]:
+        if any(y not in to_present for y in series):
+            return series
+        return {y: None if v is None else v * to_present[y] for y, v in series.items()}
+
     criteria = [
         roe_criterion,
         require_real_growth(history_criterion("lucro", "Lucro crescente, acima da inflação", "Lucro",
-                                              window, lucro, evaluate_growth), row.cagr_lucro_real),
+                                              window, real(lucro), evaluate_growth), row.cagr_lucro_real),
     ]
 
     if not financeira:
         criteria += [
             require_real_growth(history_criterion("receita", "Receita crescente, acima da inflação", "Receita",
-                                                  window, receita, evaluate_growth), row.cagr_receita_real),
+                                                  window, real(receita), evaluate_growth), row.cagr_receita_real),
             history_criterion("margem", "Margem líquida > 15%", "Margem", window, margem,
                               lambda y, v: evaluate_threshold(y, v, MARGIN_MIN, MARGIN_TOLERATED)),
         ]
@@ -1390,7 +1397,7 @@ def analyze(
         roa_window = consecutive_years(years, [roa])
         criteria += [
             require_real_growth(history_criterion("receita", "Resultado da intermediação crescente, acima da inflação",
-                                                  "Intermediação", revenue_window, receita, evaluate_growth),
+                                                  "Intermediação", revenue_window, real(receita), evaluate_growth),
                                 row.cagr_receita_real),
             history_criterion("roa", "ROA > 1%", "ROA", roa_window, roa,
                               lambda y, v: evaluate_threshold(y, v, ROA_MIN, ROA_TOLERATED)),
@@ -1653,7 +1660,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
   .chart-head { display: flex; align-items: center; gap: 8px; }
   .chart-head h3 { margin: 0; font-size: 13px; font-weight: 700; }
-  .chart-head .unit { font-size: 11px; font-weight: 500; color: var(--faint); }
+  .unit { margin: 6px 0 0; font-size: 11px; color: var(--faint); text-align: center; }
   .summary { margin: 2px 0 12px 26px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .summary b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
   /* Barras: valores em cima, anos embaixo, linha tracejada no limite do critério. */
@@ -1743,9 +1750,9 @@ HTML_TEMPLATE = r"""<!doctype html>
   </div>
   <p class="legend" aria-hidden="true">
     <span><span class="mark ok">✓</span> cumpre</span>
-    <span><span class="mark mid">≈</span> cumpre com tolerância</span>
+    <span><span class="mark mid">≈</span> cumpre com ressalva</span>
     <span><span class="mark bad">✕</span> não cumpre</span>
-    <span>Clique numa empresa para ver o porquê</span>
+    <span>Clique numa empresa para ver a evolução ano a ano</span>
   </p>
 
   <div class="table-wrap">
@@ -1820,7 +1827,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   function reason(r) {
     if (r.status === 'erro') return 'Sem demonstrações na CVM';
     if (r.status === 'aprovada') return isReduced(r) ? 'Só ROE e lucro se aplicam' : '';
-    if (r.status === 'margem') return `Tolerância em ${names(r.criterios.filter((c) => c.tolerado))}`;
+    if (r.status === 'margem') return `Ressalva em ${names(r.criterios.filter((c) => c.tolerado))}`;
     const failed = r.criterios.filter((c) => c.passed === false);
     if (failed.length) return `Não cumpre: ${names(failed)}`;
     return 'Menos de 3 anos de histórico';
@@ -1835,7 +1842,7 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   function markFor(c) {
     if (!c) return '';
-    const [cls, icon, word] = c.passed === true ? (c.tolerado ? ['mid', '≈', 'cumpre com tolerância'] : ['ok', '✓', 'cumpre'])
+    const [cls, icon, word] = c.passed === true ? (c.tolerado ? ['mid', '≈', 'cumpre com ressalva'] : ['ok', '✓', 'cumpre'])
       : c.passed === false ? ['bad', '✕', 'não cumpre'] : ['na', '?', 'sem dados'];
     return `<span class="mark ${cls}" title="${esc(c.label)}: ${word}. ${esc(c.detail)}" role="img" aria-label="${word}">${icon}</span>`;
   }
@@ -1966,7 +1973,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   function moneyScale(values, today) {
     const max = Math.max(...values.filter(isNum).map(Math.abs), 0);
     const [div, unit] = max >= 1e9 ? [1e9, 'R$ bi'] : max >= 1e6 ? [1e6, 'R$ mi'] : [1e3, 'R$ mil'];
-    return { values, unit: today ? `${unit} de hoje` : unit,
+    return { values, unit: today ? `${unit} a preços de ${PV.referencia}` : `${unit} nominais`,
       format: (v) => nf({ maximumFractionDigits: Math.abs(v / div) >= 10 ? 0 : 1 }).format(v / div) };
   }
   // Leva cada ano a reais de hoje pelo IPCA acumulado desde o fim daquele ano.
@@ -1977,8 +1984,14 @@ HTML_TEMPLATE = r"""<!doctype html>
     if (!PV.referencia || factors.some((f, i) => isNum(values[i]) && !isNum(f))) return moneyScale(values, false);
     return moneyScale(values.map((v, i) => (isNum(v) ? v * factors[i] : v)), true);
   }
-  // Cor da barra pelo critério: verde cumpre, azul-esverdeado na tolerância, vermelho não cumpre.
+  // Cor da barra pelo critério: verde cumpre, azul-esverdeado com ressalva, vermelho não cumpre.
   const above = (min, tolerated) => (v) => (v > min ? 'ok' : isNum(tolerated) && v > tolerated ? 'mid' : 'bad');
+  // Crescimento: queda real de até 10% sobre o ano anterior é tolerada; acima disso, não cumpre.
+  const rising = (v, prev) => {
+    if (v < 0 && !(isNum(prev) && v >= prev)) return 'bad';
+    if (!isNum(prev) || v >= prev) return 'ok';
+    return prev > 0 && (prev - v) / prev <= LIM.queda ? 'mid' : 'bad';
+  };
 
   // Um gráfico de barras por ano. Anos fora do período avaliado ficam apagados.
   function barChart(r, { title, unit, key, values, format, tone, limit, limitLabel, summary, extra }) {
@@ -1992,9 +2005,9 @@ HTML_TEMPLATE = r"""<!doctype html>
     const span = top - bottom || 1;
     const pos = (v) => (v - bottom) / span * 100;
     const zero = pos(0);
-    const bars = cols.map((c) => {
+    const bars = cols.map((c, i) => {
       if (!isNum(c.v)) return `<div class="col${c.out ? ' out' : ''}" title="${esc(c.label)}: sem dado"></div>`;
-      const cls = [tone ? tone(c.v) : c.v < 0 ? 'bad' : '', c.v < 0 ? 'down' : ''].join(' ');
+      const cls = [tone ? tone(c.v, cols[i - 1]?.v) : c.v < 0 ? 'bad' : '', c.v < 0 ? 'down' : ''].join(' ');
       const height = Math.max(Math.abs(pos(c.v) - zero), 1.5);
       return `<div class="col${c.out ? ' out' : ''}" title="${esc(c.label)}: ${esc(c.v < 0 && format === short.times ? `${short.mult(c.v)}, caixa líquido` : format(c.v))}${c.out ? ' (fora do período avaliado)' : ''}">
         <div class="bar ${cls}" style="bottom:${Math.min(zero, pos(c.v)).toFixed(2)}%;height:${height.toFixed(2)}%"></div></div>`;
@@ -2002,14 +2015,15 @@ HTML_TEMPLATE = r"""<!doctype html>
     const axis = (fn, cls) => `<div class="axis ${cls}" aria-hidden="true">${cols.map((c) =>
       `<span class="${c.out ? 'out' : ''}">${fn(c)}</span>`).join('')}</div>`;
     return `<section class="card" aria-label="${esc(title)}">
-      <div class="chart-head">${markFor(crit(r, key))}<h3>${title}${unit ? ` <span class="unit"${/de hoje/.test(unit) ? ` title="Corrigido pelo IPCA até ${esc(PV.referencia)}"` : ''}>${unit}</span>` : ''}</h3></div>
+      <div class="chart-head">${markFor(crit(r, key))}<h3>${title}</h3></div>
       <p class="summary">${[summary, isNum(limit) ? `limite ${limitLabel}` : ''].filter(Boolean).join(' · ')}</p>
       ${axis((c) => (isNum(c.v) ? esc(format(c.v)) : '—'), 'values')}
-      <div class="plot">${bars}
+      <div class="plot" role="img" aria-label="${esc(`${title}${unit ? ` (${unit})` : ''}: ${cols.map((c) => `${c.label} ${isNum(c.v) ? format(c.v) : 'sem dado'}`).join(', ')}`)}">${bars}
         ${bottom < 0 ? `<div class="baseline" style="bottom:${zero.toFixed(2)}%"></div>` : '<div class="baseline" style="bottom:0"></div>'}
         ${isNum(limit) ? `<div class="limit" style="bottom:${pos(limit).toFixed(2)}%"></div>` : ''}
       </div>
       ${axis((c) => esc(c.label), 'years')}
+      ${unit ? `<p class="unit" title="Valores de cada ano corrigidos pelo IPCA">${unit}</p>` : ''}
     </section>`;
   }
 
@@ -2031,14 +2045,14 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     if (!isReduced(r)) {
       list.push(barChart(r, { title: isBank(r) ? 'Intermediação' : 'Receita', key: 'receita', values: h.receita,
-        ...presentValue(r, h.receita), summary: growth(r.cagr_receita_real, r.cagr_receita) }));
+        ...presentValue(r, h.receita), tone: rising, summary: growth(r.cagr_receita_real, r.cagr_receita) }));
     }
-    list.push(barChart(r, { title: 'Lucro', key: 'lucro', ...presentValue(r, h.lucro),
+    list.push(barChart(r, { title: 'Lucro', key: 'lucro', ...presentValue(r, h.lucro), tone: rising,
       summary: growth(r.cagr_lucro_real, r.cagr_lucro) }));
     if (!isFin(r)) {
       // O critério usa a dívida de hoje contra o EBITDA dos últimos 12 meses: é a última barra.
-      list.push(barChart(r, { title: 'Dívida líq./EBITDA', key: 'div_ebitda', unit: 'vezes', values: h.divida_ebitda || [], format: short.times,
-        tone: (v) => (v < LIM.divida_ebitda ? 'ok' : 'bad'), limit: LIM.divida_ebitda, limitLabel: short.mult(LIM.divida_ebitda),
+      list.push(barChart(r, { title: 'Dívida líq./EBITDA', key: 'div_ebitda', values: h.divida_ebitda || [], format: short.times,
+        tone: (v) => (v < LIM.divida_ebitda ? 'ok' : 'bad'), limit: LIM.divida_ebitda, limitLabel: `${NF.mult.format(LIM.divida_ebitda).replace(/,0$/, '')}x`,
         extra: { label: '12m', v: r.divida_ebitda },
         summary: isNum(r.divida_liquida) && r.divida_liquida <= 0 && r.ebitda_12m > 0 ? '<b>caixa líquido</b>'
           : isNum(r.divida_ebitda) ? `hoje <b>${plain(fmt.mult(r.divida_ebitda))}</b>` : '' }));
@@ -2247,7 +2261,7 @@ def run(args: argparse.Namespace) -> list[ScreenResult]:
         basel, basel_date = {}, None
         warnings.append(f"Não consegui baixar o índice de Basileia ({type(exc).__name__}); o critério fica sem dados para bancos.")
 
-    results = [analyze(companies[cnpj], qs, fundamentals.get(cnpj), unit_sizes, ipca, basel, basel_date)
+    results = [analyze(companies[cnpj], qs, fundamentals.get(cnpj), unit_sizes, ipca, to_present, basel, basel_date)
                for cnpj, qs in selected.items()]
     results.sort(key=lambda r: r.ticker)
     errors = [r for r in results if r.status == "erro"]
