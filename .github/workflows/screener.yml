@@ -1,0 +1,65 @@
+name: Screener semanal
+
+on:
+  schedule:
+    - cron: "0 10 * * 1" # segunda-feira, 7h em Brasília (10h UTC)
+  workflow_dispatch: # botão "Run workflow" na aba Actions
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+  actions: write # para manter o agendamento ativo (ver último passo)
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TZ: America/Sao_Paulo
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Guarda os arquivos baixados da CVM e da B3 entre uma semana e outra.
+      - name: Cache dos dados
+        uses: actions/cache@v4
+        with:
+          path: .b3_cache
+          key: b3-cache-${{ github.run_id }}
+          restore-keys: b3-cache-
+
+      - name: Gerar relatório
+        run: |
+          mkdir -p site
+          python b3_screener.py --output site/index.html
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      # O GitHub desativa agendamentos de repositórios públicos após 60 dias
+      # sem commits. Reativar o próprio workflow a cada execução evita isso.
+      - name: Manter o agendamento ativo
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/screener.yml/enable"
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
