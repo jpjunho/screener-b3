@@ -317,18 +317,25 @@ def load_quotes(dl: Downloader, sessions: int, today: date) -> tuple[dict[str, Q
 # Inflação (Banco Central)
 # ------------------------------------------------------------
 
-def load_ipca(dl: Downloader, today: date) -> dict[str, float]:
-    """IPCA de cada ano completo, como fração (2025 -> 0.043)."""
+def load_ipca(dl: Downloader, today: date) -> tuple[dict[str, float], dict[str, float], Optional[str]]:
+    """IPCA de cada ano completo, como fração (2025 -> 0.043), e o fator que leva
+    valores do fim de cada ano a reais do último mês divulgado ('MM/AAAA')."""
     start = today.year - MAX_HISTORY_YEARS - 1
     path = dl.get(IPCA_URL.format(start=start, end=today.year), name="ipca_433.json")
     if path is None:
-        return {}
+        return {}, {}, None
     monthly: dict[str, list[float]] = {}
+    last_month = None
     for item in json.loads(path.read_text(encoding="utf-8")):
         day, month, year = item["data"].split("/")
         monthly.setdefault(year, []).append(float(item["valor"]))
-    return {year: math.prod(1 + v / 100 for v in values) - 1
-            for year, values in monthly.items() if len(values) == 12}
+        last_month = f"{month}/{year}"
+    annual = {year: math.prod(1 + v / 100 for v in values) - 1
+              for year, values in monthly.items() if len(values) == 12}
+    # Inflação acumulada de janeiro do ano seguinte até o último mês divulgado.
+    to_present = {year: math.prod(1 + v / 100 for later, values in monthly.items() if later > year for v in values)
+                  for year in monthly}
+    return annual, to_present, last_month
 
 
 def load_basel(dl: Downloader, today: date) -> tuple[dict[str, float], Optional[str]]:
@@ -1645,7 +1652,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; min-width: 0; }
   .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
   .chart-head { display: flex; align-items: center; gap: 8px; }
-  .chart-head h3 { margin: 0; font-size: 13px; font-weight: 700; white-space: nowrap; }
+  .chart-head h3 { margin: 0; font-size: 13px; font-weight: 700; }
   .chart-head .unit { font-size: 11px; font-weight: 500; color: var(--faint); }
   .summary { margin: 2px 0 12px 26px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .summary b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
@@ -1956,10 +1963,19 @@ HTML_TEMPLATE = r"""<!doctype html>
     times: (v) => NF.mult.format(v),
   };
   // Valores em R$ numa unidade só por gráfico, dita no título.
-  function moneyScale(values) {
+  function moneyScale(values, today) {
     const max = Math.max(...values.filter(isNum).map(Math.abs), 0);
     const [div, unit] = max >= 1e9 ? [1e9, 'R$ bi'] : max >= 1e6 ? [1e6, 'R$ mi'] : [1e3, 'R$ mil'];
-    return { unit, format: (v) => nf({ maximumFractionDigits: Math.abs(v / div) >= 10 ? 0 : 1 }).format(v / div) };
+    return { values, unit: today ? `${unit} de hoje` : unit,
+      format: (v) => nf({ maximumFractionDigits: Math.abs(v / div) >= 10 ? 0 : 1 }).format(v / div) };
+  }
+  // Leva cada ano a reais de hoje pelo IPCA acumulado desde o fim daquele ano.
+  // Sem o fator de algum ano, o gráfico inteiro fica nominal para não misturar.
+  const PV = META.valor_presente || { fatores: {} };
+  function presentValue(r, values) {
+    const factors = r.historico.anos.map((y) => PV.fatores[y]);
+    if (!PV.referencia || factors.some((f, i) => isNum(values[i]) && !isNum(f))) return moneyScale(values, false);
+    return moneyScale(values.map((v, i) => (isNum(v) ? v * factors[i] : v)), true);
   }
   // Cor da barra pelo critério: verde cumpre, azul-esverdeado na tolerância, vermelho não cumpre.
   const above = (min, tolerated) => (v) => (v > min ? 'ok' : isNum(tolerated) && v > tolerated ? 'mid' : 'bad');
@@ -1986,7 +2002,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     const axis = (fn, cls) => `<div class="axis ${cls}" aria-hidden="true">${cols.map((c) =>
       `<span class="${c.out ? 'out' : ''}">${fn(c)}</span>`).join('')}</div>`;
     return `<section class="card" aria-label="${esc(title)}">
-      <div class="chart-head">${markFor(crit(r, key))}<h3>${title}${unit ? ` <span class="unit">${unit}</span>` : ''}</h3></div>
+      <div class="chart-head">${markFor(crit(r, key))}<h3>${title}${unit ? ` <span class="unit"${/de hoje/.test(unit) ? ` title="Corrigido pelo IPCA até ${esc(PV.referencia)}"` : ''}>${unit}</span>` : ''}</h3></div>
       <p class="summary">${[summary, isNum(limit) ? `limite ${limitLabel}` : ''].filter(Boolean).join(' · ')}</p>
       ${axis((c) => (isNum(c.v) ? esc(format(c.v)) : '—'), 'values')}
       <div class="plot">${bars}
@@ -2015,9 +2031,9 @@ HTML_TEMPLATE = r"""<!doctype html>
     }
     if (!isReduced(r)) {
       list.push(barChart(r, { title: isBank(r) ? 'Intermediação' : 'Receita', key: 'receita', values: h.receita,
-        ...moneyScale(h.receita), summary: growth(r.cagr_receita_real, r.cagr_receita) }));
+        ...presentValue(r, h.receita), summary: growth(r.cagr_receita_real, r.cagr_receita) }));
     }
-    list.push(barChart(r, { title: 'Lucro', key: 'lucro', values: h.lucro, ...moneyScale(h.lucro),
+    list.push(barChart(r, { title: 'Lucro', key: 'lucro', ...presentValue(r, h.lucro),
       summary: growth(r.cagr_lucro_real, r.cagr_lucro) }));
     if (!isFin(r)) {
       // O critério usa a dívida de hoje contra o EBITDA dos últimos 12 meses: é a última barra.
@@ -2219,9 +2235,9 @@ def run(args: argparse.Namespace) -> list[ScreenResult]:
 
     print("IPCA do Banco Central...", flush=True)
     try:
-        ipca = load_ipca(dl, today)
+        ipca, to_present, ipca_month = load_ipca(dl, today)
     except (requests.RequestException, ValueError, KeyError) as exc:
-        ipca = {}
+        ipca, to_present, ipca_month = {}, {}, None
         warnings.append(f"Não consegui baixar o IPCA ({type(exc).__name__}); crescimento real indisponível.")
 
     print("Índice de Basileia do Banco Central...", flush=True)
@@ -2257,6 +2273,8 @@ def run(args: argparse.Namespace) -> list[ScreenResult]:
             "basileia": BASEL_MIN,
         },
         "ipca": {year: ipca[year] for year in sorted(ipca)[-MAX_HISTORY_YEARS:]},
+        # Receita e lucro dos gráficos vão a valor presente com estes fatores.
+        "valor_presente": {"fatores": to_present, "referencia": ipca_month},
         "avisos": warnings,
     }
     write_html(results, meta, args.output)
