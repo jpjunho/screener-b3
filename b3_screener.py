@@ -71,10 +71,11 @@ import io
 import json
 import math
 import re
+import statistics
 import sys
 import time
 import zipfile
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterator, Optional
@@ -269,6 +270,40 @@ class Quote:
     volume_medio: float  # R$ por pregão, média dos últimos pregões (0 nos dias sem negócio)
 
 
+def read_cotahist(path: Path) -> Iterator[tuple[str, str, str, float, float]]:
+    """(ticker, classe, dia, fechamento, volume) do mercado à vista, lote padrão,
+    ações e units."""
+    with zipfile.ZipFile(path) as zf, zf.open(zf.namelist()[0]) as fh:
+        for raw in fh:
+            line = raw.decode("latin-1")
+            # registro 01, BDI 02 (lote padrão), mercado 010 (à vista)
+            if line[:2] != "01" or line[10:12] != "02" or line[24:27] != "010":
+                continue
+            especie = line[39:49].split()
+            kind = especie[0] if especie else ""
+            classe = "ON" if kind == "ON" else "PN" if kind.startswith("PN") else "UNT" if kind == "UNT" else None
+            if classe is None:
+                continue
+            day = f"{line[2:6]}-{line[6:8]}-{line[8:10]}"
+            yield line[12:24].strip(), classe, day, int(line[108:121]) / 100, int(line[170:188]) / 100
+
+
+def load_year_end_prices(dl: Downloader, years: list[str]) -> dict[str, dict[str, float]]:
+    """Último fechamento de dezembro de cada ano, por ticker (para o P/L histórico)."""
+    prices: dict[str, dict[str, float]] = {}
+    for year in years:
+        y = int(year)
+        path = dl.get(COTAHIST_URL.format(month=12, year=y), final_after=datetime(y + 1, 1, 2))
+        if path is None:
+            continue
+        last: dict[str, tuple[str, float]] = {}
+        for ticker, _, day, close, _ in read_cotahist(path):
+            if ticker not in last or day > last[ticker][0]:
+                last[ticker] = (day, close)
+        prices[year] = {ticker: close for ticker, (_, close) in last.items()}
+    return prices
+
+
 def load_quotes(dl: Downloader, sessions: int, today: date) -> tuple[dict[str, Quote], str]:
     """Lê os arquivos COTAHIST mensais: mercado à vista, lote padrão, ações e units."""
     months = []
@@ -285,21 +320,9 @@ def load_quotes(dl: Downloader, sessions: int, today: date) -> tuple[dict[str, Q
                       final_after=datetime.combine(next_month + timedelta(days=1), datetime.min.time()))
         if path is None:
             continue  # mês corrente sem pregão ainda
-        with zipfile.ZipFile(path) as zf, zf.open(zf.namelist()[0]) as fh:
-            for raw in fh:
-                line = raw.decode("latin-1")
-                # registro 01, BDI 02 (lote padrão), mercado 010 (à vista)
-                if line[:2] != "01" or line[10:12] != "02" or line[24:27] != "010":
-                    continue
-                especie = line[39:49].split()
-                kind = especie[0] if especie else ""
-                classe = "ON" if kind == "ON" else "PN" if kind.startswith("PN") else "UNT" if kind == "UNT" else None
-                if classe is None:
-                    continue
-                ticker = line[12:24].strip()
-                day = f"{line[2:6]}-{line[6:8]}-{line[8:10]}"
-                daily.setdefault(ticker, {})[day] = (int(line[108:121]) / 100, int(line[170:188]) / 100)
-                classes[ticker] = classe
+        for ticker, classe, day, close, volume in read_cotahist(path):
+            daily.setdefault(ticker, {})[day] = (close, volume)
+            classes[ticker] = classe
 
     all_days = sorted({d for days in daily.values() for d in days})
     if not all_days:
@@ -525,6 +548,7 @@ class CompanyData:
     balances: dict[str, Balance] = field(default_factory=dict)  # data -> balanço
     flows: dict[tuple[str, str], Flow] = field(default_factory=dict)  # (início, fim) -> resultado
     capital: Optional[Capital] = None
+    capital_anual: dict[str, Capital] = field(default_factory=dict)  # ano da DFP -> ações no fim do exercício
     ultimo_doc: Optional[tuple[str, str]] = None  # (data de referência, link)
     periodos_individuais: int = 0  # períodos em que o consolidado veio vazio e a individual completou
     reapresentadas: dict[str, int] = field(default_factory=dict)  # ano da DFP -> versão, quando > 1
@@ -717,13 +741,16 @@ def load_fundamentals(dl: Downloader, cnpjs: set[str], today: date) -> dict[str,
         prefix = f"{doc.lower()}_cia_aberta"
         for row in iter_csv(path, f"{prefix}_composicao_capital_{year}.csv", set(data)):
             company = data[row["CNPJ_CIA"]]
+            num = lambda key: float(row.get(key) or 0)  # noqa: E731
+            capital = Capital(
+                row["DT_REFER"],
+                num("QT_ACAO_ORDIN_CAP_INTEGR") - num("QT_ACAO_ORDIN_TESOURO"),
+                num("QT_ACAO_PREF_CAP_INTEGR") - num("QT_ACAO_PREF_TESOURO"),
+            )
             if company.capital is None or row["DT_REFER"] >= company.capital.dt_refer:
-                num = lambda key: float(row.get(key) or 0)  # noqa: E731
-                company.capital = Capital(
-                    row["DT_REFER"],
-                    num("QT_ACAO_ORDIN_CAP_INTEGR") - num("QT_ACAO_ORDIN_TESOURO"),
-                    num("QT_ACAO_PREF_CAP_INTEGR") - num("QT_ACAO_PREF_TESOURO"),
-                )
+                company.capital = capital
+            if doc == "DFP":
+                company.capital_anual[row["DT_REFER"][:4]] = capital
         for row in iter_csv(path, f"{prefix}_{year}.csv", set(data)):
             company = data[row["CNPJ_CIA"]]
             if company.ultimo_doc is None or row["DT_REFER"] >= company.ultimo_doc[0]:
@@ -1185,6 +1212,7 @@ class ScreenResult:
     divida_pl: Optional[float] = None
     capitalizacao: Optional[float] = None
     pl: Optional[float] = None
+    pl_mediano: Optional[float] = None  # mediana do P/L no fim de cada exercício avaliado
     pvp: Optional[float] = None
     ev_ebitda: Optional[float] = None
     earnings_yield: Optional[float] = None
@@ -1233,9 +1261,37 @@ def share_prices(quotes: list[Quote], unit_sizes: dict[str, int]) -> tuple[Optio
     return on, pn, None
 
 
+def year_end_pe(
+    data: CompanyData, quotes: list[Quote], unit_sizes: dict[str, int], prices: dict[str, float],
+    year: str, flow: Flow, current_scale: float,
+) -> Optional[float]:
+    """Preço de dezembro × ações em circulação no fim do exercício ÷ lucro do
+    exercício. Sem valor quando o lucro não é positivo ou falta preço do papel
+    principal (ticker novo ou que mudou de nome)."""
+    capital = data.capital_anual.get(year)
+    main = max(quotes, key=lambda q: q.volume_medio)
+    if capital is None or capital.on + capital.pn <= 0 or (flow.lucro_ctrl or 0) <= 0 or main.ticker not in prices:
+        return None
+    then = [replace(q, preco=prices[q.ticker]) for q in quotes if q.ticker in prices]
+    price_on, price_pn, _ = share_prices(then, unit_sizes)
+    if price_on is None or price_pn is None:
+        return None
+    # Mesma questão de escala (unidades × milhares) do valuation atual: decide
+    # pelo lucro por ação do próprio ano e, sem ele, pela escala de hoje.
+    scale = current_scale
+    if flow.lpa:
+        implied = abs(flow.lucro_ctrl / flow.lpa)  # type: ignore[operator]
+        best = min((1, 1000), key=lambda s: abs(math.log((capital.on + capital.pn) * s / implied)))
+        if 0.5 <= (capital.on + capital.pn) * best / implied <= 2:
+            scale = best
+    market_value = (capital.on * price_on + capital.pn * price_pn) * scale
+    return market_value / flow.lucro_ctrl  # type: ignore[operator]
+
+
 def analyze(
     company: Company, quotes: list[Quote], data: Optional[CompanyData], unit_sizes: dict[str, int], ipca: dict[str, float],
-    to_present: dict[str, float], basel: dict[str, float], basel_date: Optional[str],
+    to_present: dict[str, float], year_end_prices: dict[str, dict[str, float]],
+    basel: dict[str, float], basel_date: Optional[str],
 ) -> ScreenResult:
     main = max(quotes, key=lambda q: q.volume_medio)
     row = ScreenResult(
@@ -1445,6 +1501,17 @@ def analyze(
             row.enterprise_value = vm + current.divida_liquida + (current.pl_minor or 0.0)
             if (ttm.ebitda or 0) > 0:
                 row.ev_ebitda = row.enterprise_value / ttm.ebitda  # type: ignore[operator]
+
+    # P/L no fim de cada exercício, para comparar o de hoje com a história da
+    # própria empresa. Só quando a contagem de ações atual é confiável.
+    if row.pl is not None and row.valuation_confiavel and row.acoes and data.capital:
+        current_scale = row.acoes / (data.capital.on + data.capital.pn)
+        history_pe = {y: year_end_pe(data, quotes, unit_sizes, year_end_prices.get(y, {}), y, annual[y], current_scale)
+                      for y in chronological}
+        row.historico["pl"] = [history_pe[y] for y in chronological]
+        positive = sorted(v for y, v in history_pe.items() if y in window and v is not None and v > 0)
+        if len(positive) >= MIN_HISTORY_YEARS:
+            row.pl_mediano = statistics.median(positive)
 
     failed = sum(1 for c in criteria if c.passed is False)
     unknown = sum(1 for c in criteria if c.passed is None)
@@ -1662,12 +1729,15 @@ HTML_TEMPLATE = r"""<!doctype html>
   .chart-head h3 { margin: 0; font-size: 13px; font-weight: 700; }
   .unit { margin: 6px 0 0; font-size: 11px; color: var(--faint); text-align: center; }
   .summary { margin: 2px 0 12px 26px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .summary.flush { margin-left: 0; }
   .summary b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
   /* Barras: valores em cima, anos embaixo, linha tracejada no limite do critério. */
   .plot { display: flex; gap: 2px; position: relative; height: 92px; margin: 0 0 4px; }
   .col { flex: 1; position: relative; min-width: 0; }
   .col .bar { position: absolute; left: 22%; right: 22%; background: var(--accent); border-radius: 4px 4px 0 0; }
   .col .bar.down { border-radius: 0 0 4px 4px; }
+  /* Barra cortada (valor fora da escala): o topo some aos poucos. */
+  .col .bar.clip { border-radius: 0; -webkit-mask-image: linear-gradient(to top, #000 65%, transparent); mask-image: linear-gradient(to top, #000 65%, transparent); }
   .col .bar.ok { background: var(--ok); }
   .col .bar.mid { background: var(--mid); }
   .col .bar.bad { background: var(--bad); }
@@ -1887,7 +1957,9 @@ HTML_TEMPLATE = r"""<!doctype html>
         : metric(crit(r, 'div_ebitda'),
           isNum(r.divida_liquida) && r.divida_liquida <= 0 && r.ebitda_12m > 0 ? '<span class="muted">caixa líq.</span>' : fmt.mult(r.divida_ebitda))) },
     { key: 'pl', label: 'P/L', hint: 'preço', num: true, dir: 'asc', value: (r) => (isNum(r.pl) && r.pl > 0 ? r.pl : null),
-      render: (r) => doubt(r, fmt.mult(r.pl)) },
+      render: (r) => doubt(r, isNum(r.pl_mediano) && isNum(r.pl) && r.pl > 0
+        ? `<span title="Mediana do P/L no fim de cada ano">${named(fmt.mult(r.pl), `hist. ${plain(fmt.mult(r.pl_mediano))}`)}</span>`
+        : fmt.mult(r.pl)) },
     // Considera a dívida, que o P/L ignora. Em bancos e seguradoras o EBITDA não existe: P/VP.
     { key: 'ev', label: 'EV/EBITDA', hint: 'ou P/VP', num: true, dir: 'asc',
       value: (r) => (isFin(r) || !isNum(r.ev_ebitda) || r.ev_ebitda <= 0 ? null : r.ev_ebitda),
@@ -1972,7 +2044,8 @@ HTML_TEMPLATE = r"""<!doctype html>
   // Valores em R$ numa unidade só por gráfico, dita no título.
   function moneyScale(values, today) {
     const max = Math.max(...values.filter(isNum).map(Math.abs), 0);
-    const [div, unit] = max >= 1e9 ? [1e9, 'R$ bi'] : max >= 1e6 ? [1e6, 'R$ mi'] : [1e3, 'R$ mil'];
+    // Até R$ 3 bi em milhões, para os rótulos não perderem precisão (0,4 bi).
+    const [div, unit] = max >= 3e9 ? [1e9, 'R$ bi'] : max >= 1e6 ? [1e6, 'R$ mi'] : [1e3, 'R$ mil'];
     return { values, unit: today ? `${unit} a preços de ${PV.referencia}` : `${unit} nominais`,
       format: (v) => nf({ maximumFractionDigits: Math.abs(v / div) >= 10 ? 0 : 1 }).format(v / div) };
   }
@@ -1994,11 +2067,14 @@ HTML_TEMPLATE = r"""<!doctype html>
   };
 
   // Um gráfico de barras por ano. Anos fora do período avaliado ficam apagados.
-  function barChart(r, { title, unit, key, values, format, tone, limit, limitLabel, summary, extra }) {
+  function barChart(r, { title, unit, key, values, format, tone, limit, limitLabel, limitWord = 'limite', summary, extra, cap, trim }) {
     const h = r.historico, used = new Set(r.anos_usados);
-    const cols = h.anos.map((y, i) => ({ label: y, v: values[i], out: !used.has(y) }));
+    let cols = h.anos.map((y, i) => ({ label: y, v: values[i], out: !used.has(y) }));
+    if (trim) while (cols.length && !isNum(cols[0].v)) cols = cols.slice(1);
     if (extra && isNum(extra.v)) cols.push(extra);
-    const vs = cols.map((c) => c.v).filter(isNum);
+    // Barras acima de `cap` param no topo; o rótulo mostra o valor real.
+    const height = (v) => (isNum(cap) ? Math.min(v, cap) : v);
+    const vs = cols.map((c) => c.v).filter(isNum).map(height);
     if (!vs.length) return '';
     const top = Math.max(0, ...vs, isNum(limit) ? limit : 0);
     const bottom = Math.min(0, ...vs);
@@ -2007,16 +2083,16 @@ HTML_TEMPLATE = r"""<!doctype html>
     const zero = pos(0);
     const bars = cols.map((c, i) => {
       if (!isNum(c.v)) return `<div class="col${c.out ? ' out' : ''}" title="${esc(c.label)}: sem dado"></div>`;
-      const cls = [tone ? tone(c.v, cols[i - 1]?.v) : c.v < 0 ? 'bad' : '', c.v < 0 ? 'down' : ''].join(' ');
-      const height = Math.max(Math.abs(pos(c.v) - zero), 1.5);
+      const cls = [tone ? tone(c.v, cols[i - 1]?.v) : c.v < 0 ? 'bad' : '', c.v < 0 ? 'down' : '', height(c.v) < c.v ? 'clip' : ''].join(' ');
+      const size = Math.max(Math.abs(pos(height(c.v)) - zero), 1.5);
       return `<div class="col${c.out ? ' out' : ''}" title="${esc(c.label)}: ${esc(c.v < 0 && format === short.times ? `${short.mult(c.v)}, caixa líquido` : format(c.v))}${c.out ? ' (fora do período avaliado)' : ''}">
-        <div class="bar ${cls}" style="bottom:${Math.min(zero, pos(c.v)).toFixed(2)}%;height:${height.toFixed(2)}%"></div></div>`;
+        <div class="bar ${cls}" style="bottom:${Math.min(zero, pos(height(c.v))).toFixed(2)}%;height:${size.toFixed(2)}%"></div></div>`;
     }).join('');
     const axis = (fn, cls) => `<div class="axis ${cls}" aria-hidden="true">${cols.map((c) =>
       `<span class="${c.out ? 'out' : ''}">${fn(c)}</span>`).join('')}</div>`;
     return `<section class="card" aria-label="${esc(title)}">
       <div class="chart-head">${markFor(crit(r, key))}<h3>${title}</h3></div>
-      <p class="summary">${[summary, isNum(limit) ? `limite ${limitLabel}` : ''].filter(Boolean).join(' · ')}</p>
+      <p class="summary${crit(r, key) ? '' : ' flush'}">${[summary, isNum(limit) ? `${limitWord} ${limitLabel}` : ''].filter(Boolean).join(' · ')}</p>
       ${axis((c) => (isNum(c.v) ? esc(format(c.v)) : '—'), 'values')}
       <div class="plot" role="img" aria-label="${esc(`${title}${unit ? ` (${unit})` : ''}: ${cols.map((c) => `${c.label} ${isNum(c.v) ? format(c.v) : 'sem dado'}`).join(', ')}`)}">${bars}
         ${bottom < 0 ? `<div class="baseline" style="bottom:${zero.toFixed(2)}%"></div>` : '<div class="baseline" style="bottom:0"></div>'}
@@ -2056,6 +2132,16 @@ HTML_TEMPLATE = r"""<!doctype html>
         extra: { label: '12m', v: r.divida_ebitda },
         summary: isNum(r.divida_liquida) && r.divida_liquida <= 0 && r.ebitda_12m > 0 ? '<b>caixa líquido</b>'
           : isNum(r.divida_ebitda) ? `hoje <b>${plain(fmt.mult(r.divida_ebitda))}</b>` : '' }));
+    }
+    // P/L no fim de cada ano e o de hoje, contra a mediana da própria empresa.
+    if (h.pl && h.pl.some(isNum)) {
+      const today = isNum(r.pl) && r.pl > 0 ? r.pl : null;
+      const med = r.pl_mediano;
+      list.push(barChart(r, { title: 'P/L', key: 'pl', values: h.pl, format: short.times, trim: true,
+        tone: (v) => (v < 0 ? 'bad' : ''), cap: isNum(med) ? med * 3 : null,
+        unit: 'preço ÷ lucro do ano', extra: { label: 'hoje', v: today },
+        limit: med, limitLabel: isNum(med) ? short.mult(med) : '', limitWord: 'mediana',
+        summary: today ? `hoje <b>${short.mult(today)}</b>` : 'hoje: <b>prejuízo</b>' }));
     }
     if (isBank(r)) {
       // O Banco Central só dá o índice atual: um número em vez de gráfico.
@@ -2173,13 +2259,13 @@ HTML_TEMPLATE = r"""<!doctype html>
     const num = (v, d = 4) => (isNum(v) ? v.toFixed(d).replace('.', ',') : '');
     const header = ['Ticker', 'Empresa', 'Setor', 'Resultado', 'Motivo', 'ROE pior ano', 'Margem pior ano',
       'Cresc. receita a.a.', 'Cresc. receita real a.a.', 'Cresc. lucro a.a.', 'Cresc. lucro real a.a.', 'Dív. líq./EBITDA',
-      'P/L', 'P/VP', 'EV/EBITDA', 'Earnings yield', 'Valor de mercado', 'Valuation confiável', 'Alertas altos', 'Alertas médios',
+      'P/L', 'P/L mediana histórica', 'P/VP', 'EV/EBITDA', 'Earnings yield', 'Valor de mercado', 'Valuation confiável', 'Alertas altos', 'Alertas médios',
       'Pontos de atenção', 'Caixa operacional ÷ lucro', 'Alíquota efetiva IR', 'Parecer do auditor', 'Volume médio', 'Demonstração na CVM'];
     const lines = current.map((r) => [
       r.ticker, r.nome, r.setor || '', STATUS[r.status].label, reason(r),
       num(worstYear(r, 'roe')), isFin(r) ? '' : num(worstYear(r, 'margem')),
       num(r.cagr_receita), num(r.cagr_receita_real), num(r.cagr_lucro), num(r.cagr_lucro_real), num(r.divida_ebitda, 2),
-      num(r.pl, 2), num(r.pvp, 2), num(r.ev_ebitda, 2), num(r.earnings_yield), num(r.valor_mercado, 0),
+      num(r.pl, 2), num(r.pl_mediano, 2), num(r.pvp, 2), num(r.ev_ebitda, 2), num(r.earnings_yield), num(r.valor_mercado, 0),
       r.valuation_confiavel ? 'sim' : 'não', alerts(r).alto, alerts(r).medio,
       [...r.qualidade.map((s) => `[${s.nivel}] ${s.label}: ${s.detalhe}`), ...r.avisos].join(' | '),
       num(r.conversao_caixa), num(r.aliquota_efetiva), r.parecer_auditor || '', num(r.volume_medio, 0), r.fonte || '',
@@ -2254,6 +2340,13 @@ def run(args: argparse.Namespace) -> list[ScreenResult]:
         ipca, to_present, ipca_month = {}, {}, None
         warnings.append(f"Não consegui baixar o IPCA ({type(exc).__name__}); crescimento real indisponível.")
 
+    print("Cotações de fim de ano para o P/L histórico...", flush=True)
+    try:
+        year_end_prices = load_year_end_prices(dl, [str(y) for y in range(today.year - MAX_HISTORY_YEARS, today.year)])
+    except (requests.RequestException, zipfile.BadZipFile) as exc:
+        year_end_prices = {}
+        warnings.append(f"Não consegui baixar as cotações de fim de ano ({type(exc).__name__}); P/L histórico indisponível.")
+
     print("Índice de Basileia do Banco Central...", flush=True)
     try:
         basel, basel_date = load_basel(dl, today)
@@ -2261,7 +2354,7 @@ def run(args: argparse.Namespace) -> list[ScreenResult]:
         basel, basel_date = {}, None
         warnings.append(f"Não consegui baixar o índice de Basileia ({type(exc).__name__}); o critério fica sem dados para bancos.")
 
-    results = [analyze(companies[cnpj], qs, fundamentals.get(cnpj), unit_sizes, ipca, to_present, basel, basel_date)
+    results = [analyze(companies[cnpj], qs, fundamentals.get(cnpj), unit_sizes, ipca, to_present, year_end_prices, basel, basel_date)
                for cnpj, qs in selected.items()]
     results.sort(key=lambda r: r.ticker)
     errors = [r for r in results if r.status == "erro"]
