@@ -42,11 +42,13 @@ Seguradoras e holdings de participações (BB Seguridade, Itaúsa) vivem do lucr
 das investidas: só ROE e lucro crescente são comparáveis.
 
 Resultado
-- Aprovado: atende todos os critérios à risca.
-- Aprovado com Ressalvas: atende, mas usando a tolerância em algum critério: alguns anos
-  de ROE ou margem entre 10% e 15%, ou quedas de até 10% na receita ou no
-  lucro. Com n anos, até (n - 1) // 2 anos podem usar a tolerância: 1 com 3 ou
-  4 anos, 2 com 5 anos.
+- Aprovado: atende todos os critérios à risca e não tem alerta alto na
+  qualidade do lucro.
+- Aprovado com Ressalvas: atende, mas usando a tolerância em algum critério
+  (alguns anos de ROE ou margem entre 10% e 15%, ou quedas de até 10% na
+  receita ou no lucro) ou com algum alerta alto na qualidade do lucro. Com n
+  anos, até (n - 1) // 2 anos podem usar a tolerância: 1 com 3 ou 4 anos, 2
+  com 5 anos.
 - Falta 1: reprova em exatamente um critério.
 
 "Crescente" tem duas partes, ambas em valores corrigidos pelo IPCA (do Banco
@@ -1516,7 +1518,10 @@ def analyze(
     failed = sum(1 for c in criteria if c.passed is False)
     unknown = sum(1 for c in criteria if c.passed is None)
     if failed == 0 and unknown == 0:
-        row.status = "margem" if any(c.tolerado for c in criteria) else "aprovada"
+        # Alerta alto na qualidade do lucro (auditor, caixa, impostos...) também
+        # vira ressalva: os números passam, mas pedem leitura das notas.
+        high_alert = any(s.nivel == "alto" for s in row.qualidade)
+        row.status = "margem" if high_alert or any(c.tolerado for c in criteria) else "aprovada"
     elif failed == 1 and unknown == 0:
         row.status = "quase"
     elif failed:
@@ -1897,7 +1902,11 @@ HTML_TEMPLATE = r"""<!doctype html>
   function reason(r) {
     if (r.status === 'erro') return 'Sem demonstrações na CVM';
     if (r.status === 'aprovada') return isReduced(r) ? 'Só ROE e lucro se aplicam' : '';
-    if (r.status === 'margem') return `Ressalva em ${names(r.criterios.filter((c) => c.tolerado))}`;
+    if (r.status === 'margem') {
+      const tolerated = r.criterios.filter((c) => c.tolerado), high = alerts(r).alto;
+      const alert = high ? `${high} ${high > 1 ? 'alertas altos' : 'alerta alto'}` : '';
+      return tolerated.length ? `Ressalva em ${names(tolerated)}${alert ? ` e ${alert}` : ''}` : `Ressalva: ${alert}`;
+    }
     const failed = r.criterios.filter((c) => c.passed === false);
     if (failed.length) return `Não cumpre: ${names(failed)}`;
     return 'Menos de 3 anos de histórico';
