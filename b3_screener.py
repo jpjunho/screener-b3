@@ -1587,21 +1587,21 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   /* Tabela */
   .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
   thead th {
     position: sticky; top: 0; z-index: 1; background: var(--surface); padding: 0;
     border-bottom: 1px solid var(--border); text-align: left; font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap;
   }
   th.num, td.num { text-align: right; }
   .sort-btn {
-    display: inline-flex; flex-direction: column; align-items: inherit; gap: 1px; width: 100%; padding: 10px;
+    display: inline-flex; flex-direction: column; align-items: inherit; gap: 1px; width: 100%; padding: 10px 6px;
     border: 0; background: none; cursor: pointer; color: inherit; font-weight: 600; text-align: inherit;
   }
   th.num .sort-btn { align-items: flex-end; }
   .sort-btn:hover, th[aria-sort] .sort-btn { color: var(--text); }
   .sort-btn small { font-weight: 400; color: var(--faint); font-size: 11px; }
   .sort-arrow { margin-left: 4px; color: var(--accent); }
-  tbody td { padding: 12px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
+  tbody td { padding: 12px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; white-space: nowrap; }
   tbody tr:last-child td { border-bottom: 0; }
   tbody td:first-child, thead th:first-child .sort-btn { padding-left: 14px; }
   tr.row { cursor: pointer; }
@@ -1612,7 +1612,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   .chevron { flex: none; width: 16px; height: 16px; color: var(--faint); transition: transform .15s; }
   tr.row.open .chevron { transform: rotate(90deg); color: var(--accent); }
   .ticker { font-weight: 700; }
-  .name { display: block; max-width: 145px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--muted); }
+  .name { display: block; max-width: 130px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--muted); }
   .tag { margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: var(--na-soft); color: var(--muted); font-size: 11px; font-weight: 500; }
   .badge { display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; }
   .badge.ok { background: var(--ok-soft); color: var(--ok); }
@@ -1620,7 +1620,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   .badge.warn { background: var(--warn-soft); color: var(--warn); }
   .badge.bad { background: var(--bad-soft); color: var(--bad); }
   .badge.na { background: var(--na-soft); color: var(--muted); }
-  .reason { display: block; margin-top: 3px; max-width: 165px; font-size: 12px; line-height: 1.35; color: var(--muted); white-space: normal; }
+  .reason { display: block; margin-top: 3px; max-width: 150px; font-size: 12px; line-height: 1.35; color: var(--muted); white-space: normal; }
   .metric { display: inline-flex; align-items: center; gap: 7px; }
   .sub { display: block; font-size: 10.5px; color: var(--faint); }
   .dash { color: var(--faint); }
@@ -1660,12 +1660,6 @@ HTML_TEMPLATE = r"""<!doctype html>
   .links { margin: 14px 0 0; font-size: 13px; }
   .empty-state { padding: 48px 16px; text-align: center; color: var(--muted); }
 
-  /* Como funciona */
-  .method { margin-top: 20px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
-  .method summary { padding: 14px 18px; cursor: pointer; font-weight: 600; }
-  .method-body { padding: 0 18px 18px; color: var(--muted); max-width: 860px; }
-  .method-body h4 { margin: 16px 0 4px; color: var(--text); font-size: 13px; }
-  .method-body ul { margin: 0; padding-left: 18px; }
 
   @media (max-width: 900px) {
     .detail-body { grid-template-columns: 1fr; padding-left: 14px; }
@@ -1737,10 +1731,6 @@ HTML_TEMPLATE = r"""<!doctype html>
     <div class="empty-state" id="empty" hidden></div>
   </div>
 
-  <details class="method">
-    <summary>Como funciona</summary>
-    <div class="method-body" id="methodBody"></div>
-  </details>
 </div>
 
 <script type="application/json" id="screener-data">__DATA_JSON__</script>
@@ -1778,8 +1768,8 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   // ---------- Modelo ----------
   const STATUS = {
-    aprovada:     { label: 'Passa à risca',   tone: 'ok',   rank: 5 },
-    margem:       { label: 'Passa na margem', tone: 'mid',  rank: 4 },
+    aprovada:     { label: 'Aprovado',               tone: 'ok',   rank: 5 },
+    margem:       { label: 'Aprovado com Ressalvas', tone: 'mid',  rank: 4 },
     quase:        { label: 'Falta 1',         tone: 'warn', rank: 3 },
     reprovada:    { label: 'Não passa',       tone: 'bad',  rank: 2 },
     insuficiente: { label: 'Histórico curto', tone: 'na',   rank: 1 },
@@ -1827,8 +1817,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   // Crescimento real (descontado o IPCA) em destaque, nominal embaixo.
   const realOr = (real, nominal) => (isNum(real) ? real : nominal);
   const growthCell = (real, nominal) => (isNum(real)
-    ? `<span>${fmt.signed(real)}<span class="sub">nom. ${plain(fmt.signed(nominal))}</span></span>`
-    : fmt.signed(nominal));
+    ? `<span title="Nominal: ${plain(fmt.signed(nominal))} ao ano">${fmt.signed(real)}</span>` : fmt.signed(nominal));
   const metric = (c, html) => `<span class="metric">${html}${markFor(c)}</span>`;
   const doubt = (r, html) => (r.valuation_confiavel || html === DASH ? html
     : `<span class="doubt" title="Número de ações incerto na CVM; veja os pontos de atenção">⚠ ${html}</span>`);
@@ -1853,20 +1842,24 @@ HTML_TEMPLATE = r"""<!doctype html>
       value: (r) => (isFin(r) ? null : worstYear(r, 'margem')),
       render: (r) => (isReduced(r) ? NA : isBank(r) ? metric(crit(r, 'roa'), named(fmt.pct(worstYear(r, 'roa')), 'ROA'))
         : metric(crit(r, 'margem'), fmt.pct(worstYear(r, 'margem')))) },
-    { key: 'receita', label: 'Receita', hint: 'cresc. real/ano', num: true, dir: 'desc',
+    { key: 'receita', label: 'Receita', hint: 'real ao ano', num: true, dir: 'desc',
       value: (r) => (isReduced(r) ? null : realOr(r.cagr_receita_real, r.cagr_receita)),
       render: (r) => (isReduced(r) ? NA : metric(crit(r, 'receita'), isBank(r)
-        ? named(fmt.signed(realOr(r.cagr_receita_real, r.cagr_receita)), 'intermediação')
+        ? named(fmt.signed(realOr(r.cagr_receita_real, r.cagr_receita)), 'intermed.')
         : growthCell(r.cagr_receita_real, r.cagr_receita))) },
-    { key: 'lucro', label: 'Lucro', hint: 'cresc. real/ano', num: true, dir: 'desc', value: (r) => realOr(r.cagr_lucro_real, r.cagr_lucro),
+    { key: 'lucro', label: 'Lucro', hint: 'real ao ano', num: true, dir: 'desc', value: (r) => realOr(r.cagr_lucro_real, r.cagr_lucro),
       render: (r) => metric(crit(r, 'lucro'), growthCell(r.cagr_lucro_real, r.cagr_lucro)) },
     { key: 'divida', label: 'Dív./EBITDA', hint: 'hoje', num: true, dir: 'asc',
       value: (r) => (isFin(r) ? null : (isNum(r.divida_liquida) && r.divida_liquida <= 0 && r.ebitda_12m > 0 ? -1 : r.divida_ebitda)),
       render: (r) => (isReduced(r) ? NA : isBank(r) ? metric(crit(r, 'basileia'), named(fmt.pct(r.basileia), 'Basileia'))
         : metric(crit(r, 'div_ebitda'),
           isNum(r.divida_liquida) && r.divida_liquida <= 0 && r.ebitda_12m > 0 ? '<span class="muted">caixa líq.</span>' : fmt.mult(r.divida_ebitda))) },
-    { key: 'pl', label: 'P/L', hint: 'hoje', num: true, dir: 'asc', value: (r) => (isNum(r.pl) && r.pl > 0 ? r.pl : null),
+    { key: 'pl', label: 'P/L', hint: 'preço', num: true, dir: 'asc', value: (r) => (isNum(r.pl) && r.pl > 0 ? r.pl : null),
       render: (r) => doubt(r, fmt.mult(r.pl)) },
+    // Considera a dívida, que o P/L ignora. Em bancos e seguradoras o EBITDA não existe: P/VP.
+    { key: 'ev', label: 'EV/EBITDA', hint: 'ou P/VP', num: true, dir: 'asc',
+      value: (r) => (isFin(r) || !isNum(r.ev_ebitda) || r.ev_ebitda <= 0 ? null : r.ev_ebitda),
+      render: (r) => (isFin(r) ? doubt(r, named(fmt.mult(r.pvp), 'P/VP')) : doubt(r, fmt.mult(r.ev_ebitda))) },
     { key: 'alertas', label: 'Alertas', hint: 'do lucro', dir: 'asc', cls: 'alerts-cell',
       value: (r) => (r.status === 'erro' ? null : alerts(r).alto * 10 + alerts(r).medio),
       render: (r) => {
@@ -1892,12 +1885,11 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   // ---------- Resumo ----------
   const count = (fn) => ROWS.filter(fn).length;
-  const strict = count((r) => r.status === 'aprovada'), marginal = count((r) => r.status === 'margem');
+  const passing = count((r) => r.status === 'aprovada' || r.status === 'margem');
   document.getElementById('lead').innerHTML =
-    `<strong>${strict + marginal}</strong> das ${META.analisadas} empresas com liquidez passam no método`;
+    `<strong>${passing}</strong> das ${META.analisadas} empresas com liquidez passam no método`;
   document.getElementById('meta').textContent =
-    `${strict} à risca e ${marginal} na margem · cotações até ${fmtDate(META.ultimo_pregao)} · ` +
-    `gerado em ${new Date(META.gerado_em).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })} · dados da CVM e da B3`;
+    `Atualizado em ${new Date(META.gerado_em).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}`;
   if (META.avisos.length) {
     const notice = document.getElementById('notice');
     notice.hidden = false;
@@ -2115,34 +2107,6 @@ HTML_TEMPLATE = r"""<!doctype html>
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   });
 
-  // ---------- Como funciona ----------
-  const L = META.limites;
-  const p = (v) => plain(fmt.pct(v)).replace(',0%', '%');
-  document.getElementById('methodBody').innerHTML = `
-    <h4>O método</h4>
-    <ul><li>ROE acima de ${p(L.roe)} e margem líquida acima de ${p(L.margem)} em todos os anos.</li>
-        <li>Receita e lucro crescentes: nenhuma queda de um ano para o outro e crescimento médio no período acima da inflação (crescimento real ≥ 0).</li>
-        <li>Dívida líquida abaixo de ${L.divida_ebitda} vezes o EBITDA dos últimos 12 meses.</li>
-        <li>Avalia os últimos ${META.anos_max} exercícios completos (mínimo de ${META.anos_min}).</li></ul>
-    <h4>À risca, na margem e falta 1</h4>
-    <ul><li><strong>À risca:</strong> cumpre tudo, sem exceção.</li>
-        <li><strong>Na margem:</strong> cumpre usando a tolerância: ROE ou margem entre ${p(L.roe_tolerado)} e ${p(L.roe)}, ou quedas de até ${p(L.queda)} na receita ou no lucro, em 1 ano (com 3 ou 4 anos de histórico) ou 2 anos (com 5).</li>
-        <li><strong>Falta 1:</strong> não cumpre exatamente um critério.</li></ul>
-    <h4>Bancos</h4>
-    <ul><li>As mesmas ideias, com a métrica que funciona para banco: ROE acima de ${p(L.roe)}; <strong>ROA</strong> acima de ${p(L.roa)} no lugar da margem (quanto do que o banco empresta vira lucro); <strong>índice de Basileia</strong> de pelo menos ${p(L.basileia)} no lugar da dívida (folga de capital sobre o mínimo regulatório de 10,5%, dado do Banco Central); <strong>resultado da intermediação</strong> crescente no lugar da receita (juros recebidos − custo de captação − provisões); lucro crescente.</li>
-        <li>A receita de juros bruta não serve: sobe e desce com a Selic mesmo sem o banco crescer.</li></ul>
-    <h4>Seguradoras e holdings</h4>
-    <ul><li>BB Seguridade, Caixa Seguridade, Itaúsa e afins vivem do lucro de participações em outras empresas. Não têm receita, margem nem dívida comparáveis nos dados da CVM: valem só ROE e lucro crescente.</li></ul>
-    <h4>Alertas de qualidade do lucro</h4>
-    <ul><li>Não mudam o resultado: indicam onde ler as notas explicativas com cuidado.</li>
-        <li><strong>Altos:</strong> caixa operacional abaixo de 40% do lucro; lucro sustentado por crédito de imposto; parecer do auditor com ressalva, adverso ou sem opinião; dúvida sobre a continuidade da empresa.</li>
-        <li><strong>Médios:</strong> caixa entre 40% e 70% do lucro; imposto diferido acima de 25% do lucro; ganhos fora da operação relevantes; lucro crescendo muito mais que o EBIT; contas a receber ou estoques crescendo muito mais que a receita.</li></ul>
-    <h4>Números</h4>
-    <ul><li>Fontes: demonstrações consolidadas entregues à CVM, cotações da B3 e IPCA do Banco Central (${Object.entries(META.ipca).map(([y, v]) => `${y}: ${p(v)}`).join(', ')}).</li>
-        <li>Entram empresas com volume médio de pelo menos ${plain(fmt.money(META.volume_minimo))} por pregão nos últimos ${META.pregoes} pregões.</li>
-        <li>ROE e margem na tabela mostram o pior ano do período, que é o que decide o critério. O histórico completo está nos detalhes.</li>
-        <li>Valor de mercado soma cada classe de ação pelo seu preço. ⚠ indica número de ações incerto na CVM.</li></ul>`;
-
   // O painel de detalhes acompanha a largura visível quando a tabela rola para o lado.
   const wrap = document.querySelector('.table-wrap');
   const syncWidth = () => wrap.style.setProperty('--wrap-width', `${wrap.clientWidth}px`);
@@ -2246,7 +2210,7 @@ def run(args: argparse.Namespace) -> list[ScreenResult]:
     approved = sum(1 for r in results if r.status == "aprovada")
     marginal = sum(1 for r in results if r.status == "margem")
     print(f"\nHTML gerado: {args.output.resolve()}")
-    print(f"Empresas analisadas: {meta['analisadas']} · aprovadas: {approved} · na margem: {marginal} · sem dados: {len(errors)}")
+    print(f"Empresas analisadas: {meta['analisadas']} · aprovadas: {approved} · com ressalvas: {marginal} · sem dados: {len(errors)}")
     print(f"Tempo total: {time.time() - start:.1f}s")
     return results
 
