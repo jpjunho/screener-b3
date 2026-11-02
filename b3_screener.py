@@ -1305,6 +1305,12 @@ def analyze(
     margem = {y: safe_div(lucro_total[y], receita[y]) if (receita[y] or 0) > 0 and not financeira else None for y in years}
     roa = {y: safe_div(lucro_total[y], average(assets[y], prev_assets[y])) for y in years}
 
+    def divida_ebitda(y: str) -> Optional[float]:
+        balance, ebitda = data.balances.get(ends[y]), annual[y].ebitda
+        if balance is None or balance.divida_liquida is None or (ebitda or 0) <= 0:
+            return None
+        return balance.divida_liquida / ebitda
+
     # Os critérios olham exercícios completos; avisa quando o ano corrente destoa.
     if years and ttm is not None and not approximate:
         last = annual[years[0]]
@@ -1326,6 +1332,8 @@ def analyze(
         "roe": [roe[y] for y in chronological],
         "margem": [margem[y] for y in chronological],
         "roa": [roa[y] for y in chronological],
+        # Negativo = caixa líquido. Sem valor quando o EBITDA do ano não é positivo.
+        "divida_ebitda": [None if financeira else divida_ebitda(y) for y in chronological],
     }
     if len(window) >= 2:
         row.cagr_lucro = cagr(window, [lucro[y] for y in window])  # type: ignore[misc]
@@ -1633,36 +1641,46 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   /* Detalhes */
   tr.detail > td { padding: 0; background: var(--accent-soft); white-space: normal; }
-  .detail-body {
-    position: sticky; left: 0; width: var(--wrap-width, 100%);
-    display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); gap: 14px; padding: 4px 14px 16px 40px;
-  }
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; min-width: 0; }
-  .card + .card { margin-top: 14px; }
-  .card h3 { margin: 0 0 12px; font-size: 13px; font-weight: 700; }
-  .items { list-style: none; margin: 0; padding: 0; display: grid; gap: 12px; }
+  .detail-body { position: sticky; left: 0; width: var(--wrap-width, 100%); padding: 4px 14px 16px 40px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; min-width: 0; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+  .chart-head { display: flex; align-items: center; gap: 8px; }
+  .chart-head h3 { margin: 0; font-size: 13px; font-weight: 700; white-space: nowrap; }
+  .chart-head .unit { font-size: 11px; font-weight: 500; color: var(--faint); }
+  .summary { margin: 2px 0 12px 26px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .summary b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+  /* Barras: valores em cima, anos embaixo, linha tracejada no limite do critério. */
+  .plot { display: flex; gap: 2px; position: relative; height: 92px; margin: 0 0 4px; }
+  .col { flex: 1; position: relative; min-width: 0; }
+  .col .bar { position: absolute; left: 22%; right: 22%; background: var(--accent); border-radius: 4px 4px 0 0; }
+  .col .bar.down { border-radius: 0 0 4px 4px; }
+  .col .bar.ok { background: var(--ok); }
+  .col .bar.mid { background: var(--mid); }
+  .col .bar.bad { background: var(--bad); }
+  .col.out .bar { opacity: .35; }
+  .col:hover .bar { filter: brightness(1.12); }
+  .baseline { position: absolute; left: 0; right: 0; height: 1px; background: var(--border); }
+  .limit { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--muted); opacity: .7; pointer-events: none; }
+  .axis { display: flex; gap: 2px; font-size: 10.5px; text-align: center; font-variant-numeric: tabular-nums; }
+  .axis span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; }
+  .axis.values { margin-bottom: 4px; color: var(--text); font-weight: 600; font-size: 10.5px; }
+  .axis.years { color: var(--muted); }
+  .axis .out { color: var(--faint); font-weight: 400; }
+  .stat { margin: 18px 0 6px; font-size: 28px; font-weight: 600; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+  .detail-foot { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 24px; align-items: start; margin-top: 12px; }
+  .detail-foot h3 { margin: 0 0 10px; font-size: 13px; font-weight: 700; }
+  .items { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
   .items li { display: grid; grid-template-columns: 18px 1fr; gap: 10px; }
   .item-title { font-weight: 600; }
   .item-text { display: block; margin-top: 1px; font-size: 12.5px; color: var(--muted); }
-  .hist { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .hist-wrap { overflow-x: auto; }
-  .hist th, .hist td { padding: 6px 7px; text-align: right; border-bottom: 1px solid var(--border); white-space: nowrap; }
-  .hist th:first-child, .hist td:first-child { text-align: left; color: var(--muted); font-weight: 500; }
-  .hist thead th { position: static; font-size: 12px; color: var(--muted); font-weight: 600; background: none; }
-  .hist tr:last-child td { border-bottom: 0; }
-  .hist .out { color: var(--faint); }
-  .hist .spark { width: 84px; }
-  .note { margin: 10px 0 0; font-size: 12px; color: var(--muted); }
-  .kv { display: grid; grid-template-columns: auto 1fr; gap: 6px 16px; margin: 0; font-size: 13px; }
-  .kv dt { color: var(--muted); white-space: nowrap; }
-  .kv dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
-  .kv .sep { grid-column: 1 / -1; height: 1px; background: var(--border); margin: 4px 0; }
-  .links { margin: 14px 0 0; font-size: 13px; }
+  .links { display: flex; flex-direction: column; gap: 6px; font-size: 13px; padding-top: 2px; }
+  .links .muted { font-size: 12px; }
   .empty-state { padding: 48px 16px; text-align: center; color: var(--muted); }
 
-
   @media (max-width: 900px) {
-    .detail-body { grid-template-columns: 1fr; padding-left: 14px; }
+    .detail-body { padding-left: 14px; }
+    .detail-foot { grid-template-columns: 1fr; }
+    .links { flex-direction: row; flex-wrap: wrap; gap: 6px 16px; }
   }
   @media (max-width: 720px) {
     .container { padding: 20px 16px 40px; }
@@ -1820,7 +1838,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     ? `<span title="Nominal: ${plain(fmt.signed(nominal))} ao ano">${fmt.signed(real)}</span>` : fmt.signed(nominal));
   const metric = (c, html) => `<span class="metric">${html}${markFor(c)}</span>`;
   const doubt = (r, html) => (r.valuation_confiavel || html === DASH ? html
-    : `<span class="doubt" title="Número de ações incerto na CVM; veja os pontos de atenção">⚠ ${html}</span>`);
+    : `<span class="doubt" title="Número de ações incerto na CVM; veja os alertas">⚠ ${html}</span>`);
   const NA = '<span class="dash" title="Não se aplica a seguradoras e holdings: o lucro delas vem de participações">n/a</span>';
   // Para bancos, a coluna mostra a métrica equivalente, com o nome dela embaixo.
   const named = (html, name) => `<span>${html}<span class="sub">${name}</span></span>`;
@@ -1930,16 +1948,96 @@ HTML_TEMPLATE = r"""<!doctype html>
   });
 
   // ---------- Detalhes ----------
-  function sparkline(values) {
-    const pts = values.map((v, i) => [i, v]).filter(([, v]) => isNum(v));
-    if (pts.length < 2) return '';
-    const w = 72, h = 22, n = values.length - 1 || 1;
-    const vs = pts.map(([, v]) => v), lo = Math.min(...vs), span = Math.max(...vs) - lo || 1;
-    const xy = pts.map(([i, v]) => `${(i / n * w).toFixed(1)},${(h - 3 - (v - lo) / span * (h - 6)).toFixed(1)}`);
-    const [lx, ly] = xy[xy.length - 1].split(',');
-    return `<svg width="${w + 4}" height="${h}" viewBox="-2 0 ${w + 4} ${h}" aria-hidden="true">
-      <polyline points="${xy.join(' ')}" fill="none" stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>
-      <circle cx="${lx}" cy="${ly}" r="2.2" fill="var(--accent)"/></svg>`;
+  const LIM = META.limites;
+  const short = {
+    // Rótulos curtos para caber em cima das barras: sem decimal a partir de 10%.
+    pct: (v) => nf({ style: 'percent', maximumFractionDigits: Math.abs(v) >= 0.1 ? 0 : 1 }).format(v),
+    mult: (v) => NF.mult.format(v) + 'x',
+    times: (v) => NF.mult.format(v),
+  };
+  // Valores em R$ numa unidade só por gráfico, dita no título.
+  function moneyScale(values) {
+    const max = Math.max(...values.filter(isNum).map(Math.abs), 0);
+    const [div, unit] = max >= 1e9 ? [1e9, 'R$ bi'] : max >= 1e6 ? [1e6, 'R$ mi'] : [1e3, 'R$ mil'];
+    return { unit, format: (v) => nf({ maximumFractionDigits: Math.abs(v / div) >= 10 ? 0 : 1 }).format(v / div) };
+  }
+  // Cor da barra pelo critério: verde cumpre, azul-esverdeado na tolerância, vermelho não cumpre.
+  const above = (min, tolerated) => (v) => (v > min ? 'ok' : isNum(tolerated) && v > tolerated ? 'mid' : 'bad');
+
+  // Um gráfico de barras por ano. Anos fora do período avaliado ficam apagados.
+  function barChart(r, { title, unit, key, values, format, tone, limit, limitLabel, summary, extra }) {
+    const h = r.historico, used = new Set(r.anos_usados);
+    const cols = h.anos.map((y, i) => ({ label: y, v: values[i], out: !used.has(y) }));
+    if (extra && isNum(extra.v)) cols.push(extra);
+    const vs = cols.map((c) => c.v).filter(isNum);
+    if (!vs.length) return '';
+    const top = Math.max(0, ...vs, isNum(limit) ? limit : 0);
+    const bottom = Math.min(0, ...vs);
+    const span = top - bottom || 1;
+    const pos = (v) => (v - bottom) / span * 100;
+    const zero = pos(0);
+    const bars = cols.map((c) => {
+      if (!isNum(c.v)) return `<div class="col${c.out ? ' out' : ''}" title="${esc(c.label)}: sem dado"></div>`;
+      const cls = [tone ? tone(c.v) : c.v < 0 ? 'bad' : '', c.v < 0 ? 'down' : ''].join(' ');
+      const height = Math.max(Math.abs(pos(c.v) - zero), 1.5);
+      return `<div class="col${c.out ? ' out' : ''}" title="${esc(c.label)}: ${esc(c.v < 0 && format === short.times ? `${short.mult(c.v)}, caixa líquido` : format(c.v))}${c.out ? ' (fora do período avaliado)' : ''}">
+        <div class="bar ${cls}" style="bottom:${Math.min(zero, pos(c.v)).toFixed(2)}%;height:${height.toFixed(2)}%"></div></div>`;
+    }).join('');
+    const axis = (fn, cls) => `<div class="axis ${cls}" aria-hidden="true">${cols.map((c) =>
+      `<span class="${c.out ? 'out' : ''}">${fn(c)}</span>`).join('')}</div>`;
+    return `<section class="card" aria-label="${esc(title)}">
+      <div class="chart-head">${markFor(crit(r, key))}<h3>${title}${unit ? ` <span class="unit">${unit}</span>` : ''}</h3></div>
+      <p class="summary">${[summary, isNum(limit) ? `limite ${limitLabel}` : ''].filter(Boolean).join(' · ')}</p>
+      ${axis((c) => (isNum(c.v) ? esc(format(c.v)) : '—'), 'values')}
+      <div class="plot">${bars}
+        ${bottom < 0 ? `<div class="baseline" style="bottom:${zero.toFixed(2)}%"></div>` : '<div class="baseline" style="bottom:0"></div>'}
+        ${isNum(limit) ? `<div class="limit" style="bottom:${pos(limit).toFixed(2)}%"></div>` : ''}
+      </div>
+      ${axis((c) => esc(c.label), 'years')}
+    </section>`;
+  }
+
+  function charts(r) {
+    const h = r.historico;
+    const worst = (series, f) => `pior ano: <b>${plain(f(worstYear(r, series)))}</b>`;
+    const growth = (real, nominal) => (isNum(real) ? `<b>${plain(fmt.signed(real))}</b> real ao ano`
+      : isNum(nominal) ? `<b>${plain(fmt.signed(nominal))}</b> ao ano` : '');
+    const list = [
+      barChart(r, { title: 'ROE', key: 'roe', values: h.roe, format: short.pct, tone: above(LIM.roe, LIM.roe_tolerado),
+        limit: LIM.roe, limitLabel: short.pct(LIM.roe), summary: worst('roe', fmt.pct) }),
+    ];
+    if (isBank(r)) {
+      list.push(barChart(r, { title: 'ROA', key: 'roa', values: h.roa, format: short.pct, tone: above(LIM.roa, LIM.roa / 2),
+        limit: LIM.roa, limitLabel: short.pct(LIM.roa), summary: worst('roa', fmt.pct) }));
+    } else if (!isFin(r)) {
+      list.push(barChart(r, { title: 'Margem líquida', key: 'margem', values: h.margem, format: short.pct,
+        tone: above(LIM.margem, LIM.margem_tolerada), limit: LIM.margem, limitLabel: short.pct(LIM.margem), summary: worst('margem', fmt.pct) }));
+    }
+    if (!isReduced(r)) {
+      list.push(barChart(r, { title: isBank(r) ? 'Intermediação' : 'Receita', key: 'receita', values: h.receita,
+        ...moneyScale(h.receita), summary: growth(r.cagr_receita_real, r.cagr_receita) }));
+    }
+    list.push(barChart(r, { title: 'Lucro', key: 'lucro', values: h.lucro, ...moneyScale(h.lucro),
+      summary: growth(r.cagr_lucro_real, r.cagr_lucro) }));
+    if (!isFin(r)) {
+      // O critério usa a dívida de hoje contra o EBITDA dos últimos 12 meses: é a última barra.
+      list.push(barChart(r, { title: 'Dívida líq./EBITDA', key: 'div_ebitda', unit: 'vezes', values: h.divida_ebitda || [], format: short.times,
+        tone: (v) => (v < LIM.divida_ebitda ? 'ok' : 'bad'), limit: LIM.divida_ebitda, limitLabel: short.mult(LIM.divida_ebitda),
+        extra: { label: '12m', v: r.divida_ebitda },
+        summary: isNum(r.divida_liquida) && r.divida_liquida <= 0 && r.ebitda_12m > 0 ? '<b>caixa líquido</b>'
+          : isNum(r.divida_ebitda) ? `hoje <b>${plain(fmt.mult(r.divida_ebitda))}</b>` : '' }));
+    }
+    if (isBank(r)) {
+      // O Banco Central só dá o índice atual: um número em vez de gráfico.
+      const c = crit(r, 'basileia');
+      list.push(`<section class="card" aria-label="Índice de Basileia">
+        <div class="chart-head">${markFor(c)}<h3>Índice de Basileia</h3></div><p class="summary">limite ${short.pct(LIM.basileia)}</p>
+        <p class="stat" style="margin-top:8px">${isNum(r.basileia) ? plain(fmt.pct(r.basileia)) : '—'}</p>
+        <p class="muted" style="margin:0;font-size:12px">${r.basileia_data ? `Banco Central, ${r.basileia_data.slice(4)}/${r.basileia_data.slice(0, 4)}` : 'Sem dado no Banco Central'}</p>
+      </section>`);
+    }
+    const html = list.filter(Boolean).join('');
+    return html ? `<div class="charts">${html}</div>` : '<p class="muted">Sem histórico anual.</p>';
   }
 
   // Avisos de dados e sinais de qualidade do lucro numa lista só, do mais grave ao informativo.
@@ -1949,7 +2047,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       ...r.qualidade.map((s) => ({ nivel: s.nivel, title: s.label, text: s.detalhe })),
       ...r.avisos.map((a) => ({ nivel: 'aviso', title: 'Sobre os dados', text: a })),
     ].sort((a, b) => level[a.nivel] - level[b.nivel]);
-    if (!items.length) return '<p class="muted">Nada a destacar nas demonstrações.</p>';
+    if (!items.length) return '<p class="muted" style="margin:0">Nenhum alerta nas demonstrações.</p>';
     const look = { alto: ['bad', '!'], medio: ['warn', '!'], aviso: ['warn', 'i'], info: ['na', 'i'] };
     return `<ul class="items">${items.map((it) => {
       const [cls, icon] = look[it.nivel];
@@ -1962,60 +2060,16 @@ HTML_TEMPLATE = r"""<!doctype html>
     const links = [
       r.fonte ? `<a href="${safeUrl(r.fonte)}" target="_blank" rel="noopener noreferrer">Demonstração na CVM ↗</a>` : '',
       r.site_ri ? `<a href="${safeUrl(r.site_ri)}" target="_blank" rel="noopener noreferrer">Site de RI ↗</a>` : '',
-    ].filter(Boolean).join(' · ');
+      r.data_balanco ? `<span class="muted">Balanço de ${fmtDate(r.data_balanco)}${r.base === 'individual' ? ' (individual)' : ''}</span>` : '',
+    ].filter(Boolean).join('');
     if (r.status === 'erro') {
       return `<div class="detail-body"><div class="card">${esc(r.erro)}<p class="links">${links}</p></div></div>`;
     }
-
-    const criteria = `<ul class="items">${r.criterios.map((c) => `<li>${markFor(c)}
-      <div><span class="item-title">${esc(c.label)}</span><span class="item-text">${c.tolerado ? 'Passou pela tolerância. ' : ''}${esc(c.detail)}</span></div></li>`).join('')}</ul>`;
-
-    const h = r.historico, used = new Set(r.anos_usados);
-    const rows = [
-      [`${r.receita_rotulo}, R$`, h.receita, fmt.compact, true],
-      ['Lucro, R$', h.lucro, fmt.compact, true],
-      ['ROE', h.roe, fmt.pct, false],
-      isFin(r) ? ['ROA', h.roa, fmt.pct, false] : ['Margem líq.', h.margem, fmt.pct, false],
-    ];
-    const growth = isNum(r.cagr_lucro) ? `<p class="note">Crescimento ao ano no período, real (descontado o IPCA) e nominal:
-      ${isNum(r.cagr_receita) ? `receita ${isNum(r.cagr_receita_real) ? plain(fmt.signed(r.cagr_receita_real)) : '—'} real, ${plain(fmt.signed(r.cagr_receita))} nominal; ` : ''}lucro ${isNum(r.cagr_lucro_real) ? plain(fmt.signed(r.cagr_lucro_real)) : '—'} real, ${plain(fmt.signed(r.cagr_lucro))} nominal.</p>` : '';
-    const history = h.anos.length ? `<div class="hist-wrap"><table class="hist num">
-        <thead><tr><th scope="col"></th>${h.anos.map((y) => `<th scope="col" class="${used.has(y) ? '' : 'out'}">${esc(y)}</th>`).join('')}<th></th></tr></thead>
-        <tbody>${rows.map(([label, vals, f, spark]) => `<tr><td>${label}</td>${vals.map((v, i) =>
-          `<td class="${used.has(h.anos[i]) ? '' : 'out'}">${f(v)}</td>`).join('')}<td class="spark">${spark ? sparkline(vals) : ''}</td></tr>`).join('')}</tbody>
-      </table></div>${growth}` : '<p class="muted">Sem histórico anual.</p>';
-
-    const kv = (pairs) => pairs.map((p) => (p === '-' ? '<div class="sep"></div>' : `<dt>${p[0]}</dt><dd>${p[1]}</dd>`)).join('');
-    const numbers = `<dl class="kv">${kv([
-      ['Preço', `${fmt.price(r.preco)} <span class="muted">${esc(r.ticker)}</span>`],
-      ['Valor de mercado', doubt(r, fmt.money(r.valor_mercado))],
-      ['P/L', doubt(r, fmt.mult(r.pl))], ['P/VP', doubt(r, fmt.mult(r.pvp))],
-      ...(isFin(r) ? [] : [['EV/EBITDA', doubt(r, fmt.mult(r.ev_ebitda))]]),
-      ['Earnings yield', doubt(r, fmt.pct(r.earnings_yield))],
-      '-',
-      ['Lucro (12 meses)', fmt.money(r.lucro_12m)],
-      ...(isFin(r)
-        ? [...(isBank(r) ? [['Índice de Basileia', isNum(r.basileia)
-              ? `${plain(fmt.pct(r.basileia))} <span class="muted">${r.basileia_data ? `${r.basileia_data.slice(4)}/${r.basileia_data.slice(0, 4)}` : ''}</span>` : DASH]] : []),
-           ['Patrimônio ÷ ativo', fmt.pct(r.capitalizacao)], ['ROA (12 meses)', fmt.pct(r.roa_12m)]]
-        : [['Dívida líquida', fmt.money(r.divida_liquida)], ['Caixa operacional ÷ lucro', fmt.pct(r.conversao_caixa)]]),
-      ['Alíquota efetiva de IR', fmt.pct(r.aliquota_efetiva)],
-      ['Parecer do auditor', esc(r.parecer_auditor || '—')],
-      '-',
-      ['Setor', esc(r.setor || '—')],
-      ['Volume médio', fmt.money(r.volume_medio)],
-      ['Último balanço', `${fmtDate(r.data_balanco)}${r.base === 'individual' ? ' · individual' : ''}`],
-      ...(r.outras_classes.length ? [['Outras classes', esc(r.outras_classes.join(', '))]] : []),
-    ])}</dl><p class="links">${links}</p>`;
-
     return `<div class="detail-body">
-      <div>
-        <section class="card"><h3>Critérios do método</h3>${criteria}</section>
-        <section class="card"><h3>Histórico</h3>${history}</section>
-      </div>
-      <div>
-        <section class="card"><h3>Pontos de atenção</h3>${attention(r)}</section>
-        <section class="card"><h3>Números</h3>${numbers}</section>
+      ${charts(r)}
+      <div class="detail-foot">
+        <section class="card"><h3>Alertas</h3>${attention(r)}</section>
+        <nav class="links" aria-label="Fontes">${links}</nav>
       </div></div>`;
   }
 
