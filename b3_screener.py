@@ -1820,6 +1820,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       <input id="search" type="search" placeholder="Buscar empresa ou setor" autocomplete="off">
     </label>
     <label class="check"><input type="checkbox" id="hideRisk"> Esconder alertas altos</label>
+    <label class="check" title="Seguradoras e holdings só são avaliadas por ROE e lucro"><input type="checkbox" id="hideReduced"> Esconder holdings e seguradoras</label>
     <span class="spacer"></span>
     <button class="link-btn" id="exportCsv" type="button">Baixar CSV</button>
   </div>
@@ -1985,7 +1986,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   ];
 
   // ---------- Estado ----------
-  const state = { tab: 'passam', q: '', hideRisk: false, sortKey: 'resultado', sortDir: 'desc', open: new Set() };
+  const state = { tab: 'passam', q: '', hideRisk: false, hideReduced: false, sortKey: 'resultado', sortDir: 'desc', open: new Set() };
 
   // ---------- Tema ----------
   const root = document.documentElement;
@@ -1998,6 +1999,8 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   // ---------- Resumo ----------
   const count = (fn) => ROWS.filter(fn).length;
+  // Filtros das caixas de seleção; valem para a lista e para a contagem das abas.
+  const kept = (r) => (!state.hideRisk || alerts(r).alto === 0) && (!state.hideReduced || !isReduced(r));
   const passing = count((r) => r.status === 'aprovada' || r.status === 'margem');
   document.getElementById('lead').innerHTML =
     `<strong>${passing}</strong> das ${META.analisadas} empresas com liquidez passam no método`;
@@ -2014,7 +2017,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   function renderTabs() {
     document.getElementById('tabs').innerHTML = TABS.map((t) => `
       <button class="tab" role="tab" type="button" data-tab="${t.key}" aria-selected="${state.tab === t.key}">
-        ${t.label}<span class="count num">${count(t.test)}</span></button>`).join('');
+        ${t.label}<span class="count num">${count((r) => t.test(r) && kept(r))}</span></button>`).join('');
   }
   document.getElementById('tabs').addEventListener('click', (e) => {
     const b = e.target.closest('.tab');
@@ -2207,7 +2210,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     const dir = state.sortDir === 'asc' ? 1 : -1;
     return ROWS
       .filter(tab.test)
-      .filter((r) => !state.hideRisk || alerts(r).alto === 0)
+      .filter(kept)
       .filter((r) => !q || [r.ticker, r.nome, r.setor, ...r.outras_classes].join(' ').toLocaleLowerCase('pt-BR').includes(q))
       .sort((a, b) => {
         const av = col.value(a), bv = col.value(b);
@@ -2230,7 +2233,7 @@ HTML_TEMPLATE = r"""<!doctype html>
     const empty = document.getElementById('empty');
     empty.hidden = current.length > 0;
     if (!current.length) {
-      empty.innerHTML = state.q || state.hideRisk
+      empty.innerHTML = state.q || state.hideRisk || state.hideReduced
         ? 'Nenhuma empresa com esses filtros. <button class="link-btn" type="button" id="clear">Limpar filtros</button>'
         : 'Nenhuma empresa nesta aba.';
     }
@@ -2254,10 +2257,13 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   const search = document.getElementById('search');
   search.addEventListener('input', () => { state.q = search.value; render(); });
-  document.getElementById('hideRisk').addEventListener('change', (e) => { state.hideRisk = e.target.checked; render(); });
+  document.getElementById('hideRisk').addEventListener('change', (e) => { state.hideRisk = e.target.checked; renderTabs(); render(); });
+  document.getElementById('hideReduced').addEventListener('change', (e) => { state.hideReduced = e.target.checked; renderTabs(); render(); });
   document.getElementById('empty').addEventListener('click', (e) => {
     if (e.target.id !== 'clear') return;
-    state.q = ''; search.value = ''; state.hideRisk = false; document.getElementById('hideRisk').checked = false; render();
+    state.q = ''; search.value = ''; state.hideRisk = false; state.hideReduced = false;
+    document.getElementById('hideRisk').checked = false; document.getElementById('hideReduced').checked = false;
+    renderTabs(); render();
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === '/' && !/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName)) { e.preventDefault(); search.focus(); }
