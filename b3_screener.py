@@ -1728,6 +1728,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   .search input::placeholder { color: var(--faint); }
   .check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; user-select: none; }
   .check input { width: 16px; height: 16px; accent-color: var(--accent); }
+  .check .count { color: var(--faint); }
   .spacer { flex: 1; }
   .link-btn { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 6px 2px; font-weight: 500; }
   .link-btn:hover { text-decoration: underline; }
@@ -1885,7 +1886,7 @@ HTML_TEMPLATE = r"""<!doctype html>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
       <input id="search" type="search" placeholder="Buscar empresa ou setor" autocomplete="off">
     </label>
-    <label class="check"><input type="checkbox" id="hideRisk"> Esconder alertas altos</label>
+    <label class="check"><input type="checkbox" id="hideRisk" checked> Esconder alertas altos<span class="count num" id="riskCount"></span></label>
     <label class="check" title="Seguradoras e holdings só são avaliadas por ROE e lucro"><input type="checkbox" id="hideReduced"> Esconder holdings e seguradoras</label>
     <span class="spacer"></span>
     <button class="link-btn" id="exportCsv" type="button">Baixar CSV</button>
@@ -2055,7 +2056,7 @@ HTML_TEMPLATE = r"""<!doctype html>
   ];
 
   // ---------- Estado ----------
-  const state = { tab: 'passam', q: '', hideRisk: false, hideReduced: false, sortKey: 'resultado', sortDir: 'desc', open: new Set() };
+  const state = { tab: 'passam', q: '', hideRisk: true, hideReduced: false, sortKey: 'resultado', sortDir: 'desc', open: new Set() };
 
   // ---------- Tema ----------
   const root = document.documentElement;
@@ -2084,6 +2085,10 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   // ---------- Abas ----------
   function renderTabs() {
+    // Quantas empresas da aba atual a caixa de alertas está escondendo.
+    const tab = TABS.find((t) => t.key === state.tab);
+    const hidden = count((r) => tab.test(r) && alerts(r).alto > 0 && (!state.hideReduced || !isReduced(r)));
+    document.getElementById('riskCount').textContent = state.hideRisk && hidden ? `(${hidden} ${hidden > 1 ? "ocultas" : "oculta"})` : '';
     document.getElementById('tabs').innerHTML = TABS.map((t) => `
       <button class="tab" role="tab" type="button" data-tab="${t.key}" aria-selected="${state.tab === t.key}">
         ${t.label}<span class="count num">${count((r) => t.test(r) && kept(r))}</span></button>`).join('');
