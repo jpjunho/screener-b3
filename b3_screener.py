@@ -53,7 +53,13 @@ Resultado
 
 "Crescente" tem duas partes, ambas em valores corrigidos pelo IPCA (do Banco
 Central): nenhuma queda de um ano para o outro, com a tolerância acima, e
-crescimento médio no período ≥ 0. Dívida líquida / patrimônio aparece só como
+crescimento médio no período ≥ 0.
+
+Os últimos 12 meses (último exercício + ITRs do ano) entram nos critérios de
+ROE, margem, ROA, receita e lucro como um ano provisório no fim do período:
+uma piora recente já conta, sem esperar o exercício fechar. Fora da tolerância,
+reprovam o critério; dentro dela, viram ressalva, sem gastar a tolerância dos
+anos fechados. Dívida líquida / patrimônio aparece só como
 informação.
 
 Uso
@@ -112,6 +118,7 @@ ROA_MIN, ROA_TOLERATED = 0.01, 0.005
 # 10,5%; os grandes bancos ficam entre 14% e 17%. 13% exige folga sobre o
 # mínimo, como dívida < 3x EBITDA exige folga das empresas comuns.
 BASEL_MIN = 0.13
+TTM = "12m"  # rótulo dos últimos 12 meses no histórico
 
 REQUEST_TIMEOUT = 120
 USER_AGENT = "b3-screener/2.0 (python-requests)"
@@ -833,6 +840,7 @@ def trailing_twelve_months(data: CompanyData) -> tuple[Optional[Flow], Optional[
         lucro=combine(prev_year.lucro, ytd.lucro, prev_ytd.lucro),
         lucro_ctrl=combine(prev_year.lucro_ctrl, ytd.lucro_ctrl, prev_ytd.lucro_ctrl),
         da=combine(prev_year.da, ytd.da, prev_ytd.da),
+        intermediacao=combine(prev_year.intermediacao, ytd.intermediacao, prev_ytd.intermediacao),
     )
     return ttm, latest_end, False
 
@@ -1322,7 +1330,7 @@ def analyze(
     latest_date = max(data.balances) if data.balances else None
     current = data.balances[latest_date] if latest_date else Balance()
     row.data_balanco = latest_date
-    ttm, _, approximate = trailing_twelve_months(data)
+    ttm, ttm_end, approximate = trailing_twelve_months(data)
     ttm = ttm or Flow()
     if approximate:
         row.avisos.append("Últimos 12 meses aproximados pelo último exercício (faltou o trimestre comparável).")
@@ -1370,6 +1378,53 @@ def analyze(
     margem = {y: safe_div(lucro_total[y], receita[y]) if (receita[y] or 0) > 0 and not financeira else None for y in years}
     roa = {y: safe_div(lucro_total[y], average(assets[y], prev_assets[y])) for y in years}
 
+    # Últimos 12 meses como um ano provisório no fim do histórico: uma piora
+    # recente já conta nos critérios, sem esperar o exercício fechar. Só quando
+    # há ITR depois do último exercício (senão os 12 meses são o próprio ano).
+    has_ttm = bool(years) and not approximate and ttm_end is not None and ttm_end > ends[years[0]]
+    if has_ttm:
+        prev_balance = data.balances.get(shift_year(ttm_end, -1))  # type: ignore[arg-type]
+        receita[TTM] = ttm.intermediacao if bank_like else ttm.receita
+        lucro[TTM], lucro_total[TTM], equity[TTM] = ttm.lucro_ctrl, ttm.lucro, current.pl_ctrl
+        roe[TTM] = (safe_div(ttm.lucro_ctrl, average(current.pl_ctrl, prev_balance.pl_ctrl if prev_balance else None))
+                    if (current.pl_ctrl or 0) > 0 else None)
+        if current.pl_ctrl is not None and current.pl_ctrl <= 0:
+            negative_equity.append(TTM)
+        margem[TTM] = safe_div(ttm.lucro, receita[TTM]) if (receita[TTM] or 0) > 0 and not financeira else None
+        roa[TTM] = safe_div(ttm.lucro, average(current.ativo, prev_balance.ativo if prev_balance else None))
+
+    def with_ttm(win: list[str], series: list[dict[str, Optional[float]]]) -> list[str]:
+        """A janela de anos com os 12 meses na frente, quando eles continuam a
+        sequência e têm dado em todas as séries."""
+        if has_ttm and len(win) >= MIN_HISTORY_YEARS and win[0] == years[0] and all(x.get(TTM) is not None for x in series):
+            return [TTM, *win]
+        return win
+
+    def provisional(c: Criterion, win: list[str], series: dict[str, Optional[float]],
+                    judge: Callable[[float, float], tuple[str, str]]) -> Criterion:
+        """Os 12 meses como ano provisório: reprovam o critério fora da
+        tolerância e viram ressalva dentro dela, sem gastar a tolerância dos
+        anos fechados (eles se sobrepõem em parte ao último exercício)."""
+        if c.passed is None or with_ttm(win, [series]) == win:
+            return c
+        verdict, text = judge(series[TTM], series[win[0]])  # type: ignore[arg-type]
+        c.detail += f"; últimos 12 meses: {text}"
+        if verdict == "bad":
+            c.passed, c.tolerado = False, False
+        elif verdict == "mid" and c.passed:
+            c.tolerado = True
+        return c
+
+    def at_least(minimum: float, tolerated: float) -> Callable[[float, float], tuple[str, str]]:
+        return lambda v, _: ("ok" if v > minimum else "mid" if v > tolerated else "bad", fmt_pct(v))
+
+    def no_drop(v: float, prev: float) -> tuple[str, str]:
+        if v >= prev:
+            return "ok", "sem queda"
+        drop = (prev - v) / prev if prev > 0 else math.inf
+        text = "piora de prejuízo" if math.isinf(drop) else f"queda de {fmt_pct(drop)}"
+        return ("mid" if drop <= MAX_DROP_PCT else "bad"), text
+
     def divida_ebitda(y: str) -> Optional[float]:
         balance, ebitda = data.balances.get(ends[y]), annual[y].ebitda
         if balance is None or balance.divida_liquida is None or (ebitda or 0) <= 0:
@@ -1379,9 +1434,6 @@ def analyze(
     # Os critérios olham exercícios completos; avisa quando o ano corrente destoa.
     if years and ttm is not None and not approximate:
         last = annual[years[0]]
-        if (last.lucro_ctrl or 0) > 0 and ttm.lucro_ctrl is not None and ttm.lucro_ctrl < 0.7 * last.lucro_ctrl:
-            row.avisos.append(f"Lucro dos últimos 12 meses ({fmt_bi(ttm.lucro_ctrl)}) bem abaixo do exercício "
-                              f"de {years[0]} ({fmt_bi(last.lucro_ctrl)}): os critérios ainda não captam essa piora.")
         if not financeira and (last.receita or 0) > 0 and ttm.receita and not 0.5 <= ttm.receita / last.receita <= 2:
             row.avisos.append(f"Receita dos últimos 12 meses ({fmt_bi(ttm.receita)}) muito diferente da de {years[0]} "
                               f"({fmt_bi(last.receita)}): provável reorganização societária; o histórico pode não ser comparável.")
@@ -1400,6 +1452,12 @@ def analyze(
         # Negativo = caixa líquido. Sem valor quando o EBITDA do ano não é positivo.
         "divida_ebitda": [None if financeira else divida_ebitda(y) for y in chronological],
     }
+    if has_ttm:
+        row.historico["ttm"] = {
+            "fim": ttm_end, "usado": with_ttm(window, required) != window,
+            **{key: series.get(TTM) for key, series in
+               (("receita", receita), ("lucro", lucro), ("roe", roe), ("margem", margem), ("roa", roa))},
+        }
     if len(window) >= 2:
         row.cagr_lucro = cagr(window, [lucro[y] for y in window])  # type: ignore[misc]
         row.cagr_lucro_real = real_cagr(window, row.cagr_lucro, ipca)
@@ -1409,32 +1467,38 @@ def analyze(
         row.cagr_receita = cagr(revenue_window, [receita[y] for y in revenue_window])  # type: ignore[misc]
         row.cagr_receita_real = real_cagr(revenue_window, row.cagr_receita, ipca)
 
-    bad_equity = [y for y in window if y in negative_equity]
+    bad_equity = [y for y in window if y in negative_equity] + ([TTM] if TTM in negative_equity else [])
     if bad_equity:
         roe_criterion = Criterion("roe", "ROE > 15%", "ROE", False,
                                   f"patrimônio líquido negativo em {', '.join(sorted(bad_equity))}: ROE sem sentido")
     else:
-        roe_criterion = history_criterion("roe", "ROE > 15%", "ROE", window, roe,
-                                          lambda y, v: evaluate_threshold(y, v, ROE_MIN, ROE_TOLERATED))
+        roe_criterion = provisional(history_criterion("roe", "ROE > 15%", "ROE", window, roe,
+                                                      lambda y, v: evaluate_threshold(y, v, ROE_MIN, ROE_TOLERATED)),
+                                    window, roe, at_least(ROE_MIN, ROE_TOLERATED))
     # Quedas ano a ano medidas em reais de hoje, os mesmos valores dos gráficos.
     # Sem IPCA para algum ano, fica o nominal.
+    # Os 12 meses já estão em reais de agora.
     def real(series: dict[str, Optional[float]]) -> dict[str, Optional[float]]:
-        if any(y not in to_present for y in series):
+        factors = {y: 1.0 if y == TTM else to_present.get(y) for y in series}
+        if any(f is None for f in factors.values()):
             return series
-        return {y: None if v is None else v * to_present[y] for y, v in series.items()}
+        return {y: None if v is None else v * factors[y] for y, v in series.items()}  # type: ignore[operator]
 
     criteria = [
         roe_criterion,
-        require_real_growth(history_criterion("lucro", "Lucro crescente, acima da inflação", "Lucro",
-                                              window, real(lucro), evaluate_growth), row.cagr_lucro_real),
+        provisional(require_real_growth(history_criterion("lucro", "Lucro crescente, acima da inflação", "Lucro",
+                                                          window, real(lucro), evaluate_growth), row.cagr_lucro_real),
+                    window, real(lucro), no_drop),
     ]
 
     if not financeira:
         criteria += [
-            require_real_growth(history_criterion("receita", "Receita crescente, acima da inflação", "Receita",
-                                                  window, real(receita), evaluate_growth), row.cagr_receita_real),
-            history_criterion("margem", "Margem líquida > 15%", "Margem", window, margem,
-                              lambda y, v: evaluate_threshold(y, v, MARGIN_MIN, MARGIN_TOLERATED)),
+            provisional(require_real_growth(history_criterion("receita", "Receita crescente, acima da inflação", "Receita",
+                                                              window, real(receita), evaluate_growth), row.cagr_receita_real),
+                        window, real(receita), no_drop),
+            provisional(history_criterion("margem", "Margem líquida > 15%", "Margem", window, margem,
+                                          lambda y, v: evaluate_threshold(y, v, MARGIN_MIN, MARGIN_TOLERATED)),
+                        window, margem, at_least(MARGIN_MIN, MARGIN_TOLERATED)),
         ]
         dl, ebitda, pl_total = current.divida_liquida, ttm.ebitda, current.pl
         row.divida_ebitda = safe_div(dl, ebitda) if (ebitda or 0) > 0 else None
@@ -1454,11 +1518,13 @@ def analyze(
         # vendas -> intermediação, margem -> ROA, dívida -> índice de Basileia.
         roa_window = consecutive_years(years, [roa])
         criteria += [
-            require_real_growth(history_criterion("receita", "Resultado da intermediação crescente, acima da inflação",
-                                                  "Intermediação", revenue_window, real(receita), evaluate_growth),
-                                row.cagr_receita_real),
-            history_criterion("roa", "ROA > 1%", "ROA", roa_window, roa,
-                              lambda y, v: evaluate_threshold(y, v, ROA_MIN, ROA_TOLERATED)),
+            provisional(require_real_growth(history_criterion("receita", "Resultado da intermediação crescente, acima da inflação",
+                                                              "Intermediação", revenue_window, real(receita), evaluate_growth),
+                                            row.cagr_receita_real),
+                        revenue_window, real(receita), no_drop),
+            provisional(history_criterion("roa", "ROA > 1%", "ROA", roa_window, roa,
+                                          lambda y, v: evaluate_threshold(y, v, ROA_MIN, ROA_TOLERATED)),
+                        roa_window, roa, at_least(ROA_MIN, ROA_TOLERATED)),
         ]
         when = f"{basel_date[4:]}/{basel_date[:4]}" if basel_date else ""
         if row.basileia is None:
@@ -1914,10 +1980,13 @@ HTML_TEMPLATE = r"""<!doctype html>
   }
 
   // Valor do pior ano dentro do período avaliado (é ele que decide o critério).
+  // Os últimos 12 meses entram como um ano provisório quando continuam o período.
   function worstYear(r, series) {
-    const used = new Set(r.anos_usados);
-    const vals = r.historico.anos.map((y, i) => (used.has(y) ? r.historico[series][i] : null)).filter(isNum);
-    return vals.length ? Math.min(...vals) : null;
+    const used = new Set(r.anos_usados), t = r.historico.ttm;
+    const vals = r.historico.anos.map((y, i) => (used.has(y) ? r.historico[series][i] : null));
+    if (t && t.usado) vals.push(t[series]);
+    const nums = vals.filter(isNum);
+    return nums.length ? Math.min(...nums) : null;
   }
 
   function markFor(c) {
@@ -2064,10 +2133,12 @@ HTML_TEMPLATE = r"""<!doctype html>
   // Leva cada ano a reais de hoje pelo IPCA acumulado desde o fim daquele ano.
   // Sem o fator de algum ano, o gráfico inteiro fica nominal para não misturar.
   const PV = META.valor_presente || { fatores: {} };
-  function presentValue(r, values) {
+  // Os 12 meses (extra) já estão em reais de agora; entram só na escala.
+  function presentValue(r, values, extra) {
     const factors = r.historico.anos.map((y) => PV.fatores[y]);
-    if (!PV.referencia || factors.some((f, i) => isNum(values[i]) && !isNum(f))) return moneyScale(values, false);
-    return moneyScale(values.map((v, i) => (isNum(v) ? v * factors[i] : v)), true);
+    const withExtra = (scale) => ({ ...scale, values: scale.values.slice(0, values.length), extra });
+    if (!PV.referencia || factors.some((f, i) => isNum(values[i]) && !isNum(f))) return withExtra(moneyScale([...values, extra?.v], false));
+    return withExtra(moneyScale([...values.map((v, i) => (isNum(v) ? v * factors[i] : v)), extra?.v], true));
   }
   // Cor da barra pelo critério: verde cumpre, azul-esverdeado com ressalva, vermelho não cumpre.
   const above = (min, tolerated) => (v) => (v > min ? 'ok' : isNum(tolerated) && v > tolerated ? 'mid' : 'bad');
@@ -2117,25 +2188,27 @@ HTML_TEMPLATE = r"""<!doctype html>
 
   function charts(r) {
     const h = r.historico;
+    // Barra "12m" de cada série; apagada quando não continua o período avaliado.
+    const ttm = (key) => (h.ttm && isNum(h.ttm[key]) ? { label: '12m', v: h.ttm[key], out: !h.ttm.usado } : null);
     const worst = (series, f) => `pior ano: <b>${plain(f(worstYear(r, series)))}</b>`;
     const growth = (real, nominal) => (isNum(real) ? `<b>${plain(fmt.signed(real))}</b> real ao ano`
       : isNum(nominal) ? `<b>${plain(fmt.signed(nominal))}</b> ao ano` : '');
     const list = [
-      barChart(r, { title: 'ROE', key: 'roe', values: h.roe, format: short.pct, tone: above(LIM.roe, LIM.roe_tolerado),
+      barChart(r, { title: 'ROE', key: 'roe', values: h.roe, extra: ttm('roe'), format: short.pct, tone: above(LIM.roe, LIM.roe_tolerado),
         limit: LIM.roe, limitLabel: short.pct(LIM.roe), summary: worst('roe', fmt.pct) }),
     ];
     if (isBank(r)) {
-      list.push(barChart(r, { title: 'ROA', key: 'roa', values: h.roa, format: short.pct, tone: above(LIM.roa, LIM.roa / 2),
+      list.push(barChart(r, { title: 'ROA', key: 'roa', values: h.roa, extra: ttm('roa'), format: short.pct, tone: above(LIM.roa, LIM.roa / 2),
         limit: LIM.roa, limitLabel: short.pct(LIM.roa), summary: worst('roa', fmt.pct) }));
     } else if (!isFin(r)) {
-      list.push(barChart(r, { title: 'Margem líquida', key: 'margem', values: h.margem, format: short.pct,
+      list.push(barChart(r, { title: 'Margem líquida', key: 'margem', values: h.margem, extra: ttm('margem'), format: short.pct,
         tone: above(LIM.margem, LIM.margem_tolerada), limit: LIM.margem, limitLabel: short.pct(LIM.margem), summary: worst('margem', fmt.pct) }));
     }
     if (!isReduced(r)) {
-      list.push(barChart(r, { title: isBank(r) ? 'Intermediação' : 'Receita', key: 'receita', values: h.receita,
-        ...presentValue(r, h.receita), tone: rising, summary: growth(r.cagr_receita_real, r.cagr_receita) }));
+      list.push(barChart(r, { title: isBank(r) ? 'Intermediação' : 'Receita', key: 'receita',
+        ...presentValue(r, h.receita, ttm('receita')), tone: rising, summary: growth(r.cagr_receita_real, r.cagr_receita) }));
     }
-    list.push(barChart(r, { title: 'Lucro', key: 'lucro', ...presentValue(r, h.lucro), tone: rising,
+    list.push(barChart(r, { title: 'Lucro', key: 'lucro', ...presentValue(r, h.lucro, ttm('lucro')), tone: rising,
       summary: growth(r.cagr_lucro_real, r.cagr_lucro) }));
     if (!isFin(r)) {
       // O critério usa a dívida de hoje contra o EBITDA dos últimos 12 meses: é a última barra.
